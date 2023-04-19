@@ -8,170 +8,196 @@ $realRoot = null;
 // Set params and do basic security checks
 error_reporting(E_ERROR);
 
-$virtualRoot = "/" . trim($virtualRoot? $virtualRoot : "", "/");
-$realRoot = "/" . trim($realRoot? $realRoot : $_SERVER["DOCUMENT_ROOT"], "/");
+// Main logic
+class LsDir {
+    const DEFAULT_GROUP = "Misc";
+    const LINKS_GROUP = "Links";
+    const LINKS_FILE = "links.csv";
 
-$reqUri = $_SERVER["REQUEST_URI"];
-$workingUrl = parse_url($reqUri);
-$workingQuery = [];
+    public $realRoot;
+    public $virtualRoot;
 
-parse_str($workingUrl["query"] ?? "", $workingQuery);
-
-$reqPath = "/" . trim($workingUrl["path"] ?? "", "/");
-$realPath = $realRoot . $reqPath;
-
-// Strip vroot
-if (substr($reqPath, 0, strlen($virtualRoot)) == $virtualRoot) {
-    $realPath = $realRoot . substr($reqPath, strlen($virtualRoot));
-}
-
-// Final canonical path and 400 checks
-$realPath = realpath($realPath);
-$sort = $workingQuery["s"] ?? null;
-$sortDir = $workingQuery["d"] ?? null;
-$pageTitle = "ls $reqPath/";
-
-if ($realPath === false) {
-    http_response_code(404);
-    exit;
-} else if (strpos($realPath, $realRoot) !== 0 || !is_readable($realPath)) {
-    http_response_code(403);
-    exit;
-} else if (!($dir = opendir($realPath))) {
-    http_response_code(400);
-    //readfile($realPath);
-    exit;
-}
-
-$linkPath = "$realPath/links.csv";
-
-// ls working dir
-$ls = [];
-
-while (true) {
-    $entry = readdir($dir);
-
-    if ($entry === false) {
-        break;
-    }
-
-    $ls[$entry] = (object)[
-        "name" => $entry,
-        "canonical" => "$realPath/$entry",
-        "href" => "$reqPath/$entry"
+    public static $entryGroups = [
+        "Music" => [
+            ".mp3",
+            ".ogg",
+            ".flac"
+        ],
+        "Images" => [
+            ".jpg",
+            ".png",
+            ".bmp",
+        ],
+        "Videos" => [
+            ".mp4",
+            ".ogv",
+            ".avi"
+        ],
+        self::LINKS_GROUP => []
     ];
 
-    $stat = stat($ls[$entry]->canonical);
-    foreach (["size", "atime", "ctime", "mtime"] as $k) {
-        $ls[$entry]->{$k} = $stat[$k] ?? null;
+    public function __construct($realRoot, $virtualRoot=null) {
+        $this->virtualRoot = "/" . trim($virtualRoot? $virtualRoot : "", "/");
+        $this->realRoot = "/" . trim($realRoot? $realRoot : $_SERVER["DOCUMENT_ROOT"], "/");
     }
-}
 
-closedir($dir);
+    public function aggregateEntries($entries) {
+        $groupKeys = array_keys(self::$entryGroups);
+        $aggregated = array_fill_keys($groupKeys, []);
 
-// Sort
-usort($ls, function($a, $b) use ($sort, $sortDir) {
-    $sort = $sort ?? "name";
-    $desc = $sortDir == "desc";
-    $a = $a->{$sort} ?? null;
-    $b = $b->{$sort} ?? null;
+        foreach ($entries as $entry) {
+            $lastDot = strrpos($entry->name, ".");
+            $ext = $lastDot? substr($entry->name, $lastDot) : null;
+            $entryGroup = self::DEFAULT_GROUP;
 
-    if ($a < $b) {
-        return !$desc? -1 : 1;
-    } else if ($a > $b) {
-        return !$desc? 1 : -1;
-    } else {
-        return 0;
-    }
-});
+            foreach (self::$entryGroups as $group => $groupExt) {
+                if (in_array($ext, $groupExt, true)) {
+                    $entryGroup = $group;
+                    break;
+                }
+            }
 
-// Aggregate
-$groups = [
-    "Music" => [
-        ".mp3",
-        ".ogg",
-        ".flac"
-    ],
-    "Images" => [
-        ".jpg",
-        ".png",
-        ".bmp",
-    ],
-    "Videos" => [
-        ".mp4",
-        ".ogv",
-        ".avi"
-    ]
-];
-$defaultGroup = "Stuff";
-$sortKeys = array_flip(array_keys($groups));
-$aggregatedLs = [];
+            if (!isset($aggregated[$entryGroup])) {
+                $aggregated[$entryGroup] = [];
+            }
 
-foreach ($ls as $entry) {
-    $lastDot = strrpos($entry->name, ".");
-    $ext = $lastDot? substr($entry->name, $lastDot) : null;
-    $entryGroup = $defaultGroup;
-
-    foreach ($groups as $group => $groupExt) {
-        if (in_array($ext, $groupExt, true)) {
-            $entryGroup = $group;
-            break;
+            $aggregated[$entryGroup][] = $entry;
         }
+
+        return $aggregated;
     }
 
-    if (!isset($aggregatedLs[$entryGroup])) {
-        $aggregatedLs[$entryGroup] = [];
-    }
+    public function assertRequest($req) {
+        $dir = null;
 
-    $aggregatedLs[$entryGroup][] = $entry;
-}
+        if ($req->realPath === false) {
+            http_response_code(404);
+            exit;
+        } else if (strpos($req->realPath, $this->realRoot) !== 0 || !is_readable($req->realPath)) {
+            http_response_code(403);
+            exit;
+        }
 
-uksort($aggregatedLs, function($a, $b) use ($sortKeys) {
-    $a = $sortKeys[$a] ?? 500;
-    $b = $sortKeys[$b] ?? 500;
+        $entries = $this->getEntries($req);
 
-    if ($a < $b) {
-        return -1;
-    } else if ($a > $b) {
-        return 1;
-    } else {
-        return 0;
-    }
-});
+        if (is_null($entries)) {
+            http_response_code(400);
+            exit;
+        }
 
-// Main / stuff I need to encapsulate
-function getLinkEntries($filename) {
-    $stream = fopen($filename, "r");
-    $entries = [];
-
-    if (!$stream) {
         return $entries;
     }
 
-    while (($line = fgetcsv($stream)) !== false) {
-        $line = array_filter(array_map("trim", $line));
+    public function getEntries($req) {
+        $ls = [];
 
-        if (count($line) < 2 || $line[0][0] == '#') {
-            continue;
+        $dir = opendir($req->realPath);
+
+        if (!$dir) {
+            return null;
         }
 
-        $slug = $line[0];
+        while (true) {
+            $entry = readdir($dir);
 
-        if (!$slug || $slug[0] == '#') {
-            continue;
+            if ($entry === false) {
+                break;
+            }
+
+            $ls[$entry] = (object)[
+                "name" => $entry,
+                "canonical" => "$req->realPath/$entry",
+                "href" => "$req->path/$entry"
+            ];
+
+            $stat = stat($ls[$entry]->canonical);
+            foreach (["size", "atime", "ctime", "mtime"] as $k) {
+                $ls[$entry]->{$k} = $stat[$k] ?? null;
+            }
         }
 
-        $entries[$slug] = (object)[
-            "slug" => $slug,
-            "name" => $line[2] ?? $slug,
-            "href" => $line[1],
-            "description" => $line[3] ?? null,
+        closedir($dir);
+
+        return $ls;
+    }
+
+    public function getLinkEntries($realPath) {
+        $stream = fopen($realPath, "r");
+        $entries = [];
+
+        if (!$stream) {
+            return $entries;
+        }
+
+        while (($line = fgetcsv($stream)) !== false) {
+            $line = array_filter(array_map(function($field) {
+                return trim((string)$field);
+            }, $line));
+
+            if (count($line) < 2 || $line[0][0] == '#') {
+                continue;
+            }
+
+            $slug = $line[0];
+
+            $entries[$slug] = (object)[
+                "slug" => $slug,
+                "name" => $line[2] ?? $slug,
+                "href" => $line[1],
+                "description" => $line[3] ?? null,
+            ];
+        }
+
+        fclose($stream);
+
+        return $entries;
+    }
+
+    public function resolveRequest() {
+        $reqUri = $_SERVER["REQUEST_URI"];
+        $workingUrl = parse_url($reqUri);
+        $workingQuery = [];
+
+        parse_str($workingUrl["query"] ?? "", $workingQuery);
+
+        $reqPath = "/" . trim($workingUrl["path"] ?? "", "/");
+        $realPath = $this->realRoot . $reqPath;
+
+        // Strip vroot
+        if (substr($reqPath, 0, strlen($this->virtualRoot)) == $this->virtualRoot) {
+            $realPath = $this->realRoot . substr($reqPath, strlen($this->virtualRoot));
+        }
+
+        $realPath = realpath($realPath);
+
+        return (object)[
+            "path" => $reqPath,
+            "realPath" => $realPath,
+            "query" => $workingQuery
         ];
     }
 
-    fclose($stream);
+    public function sortEntries($entries, $opts=[]) {
+        $sort = $opts["by"];
+        $sortDir = $opts["dir"];
 
-    return $entries;
+        usort($entries, function($a, $b) use ($sort, $sortDir) {
+            $sort = $sort ?? "name";
+            $desc = $sortDir == "desc";
+            $a = $a->{$sort} ?? null;
+            $b = $b->{$sort} ?? null;
+
+            if ($a < $b) {
+                return !$desc? -1 : 1;
+            } else if ($a > $b) {
+                return !$desc? 1 : -1;
+            } else {
+                return 0;
+            }
+        });
+
+        return $entries;
+    }
 }
 
 // Utils
@@ -202,6 +228,23 @@ function prettySize($size) {
         }
     }
 }
+
+// Init
+$lister = new LsDir($realRoot, $virtualRoot);
+
+$req = $lister->resolveRequest();
+$entries = $lister->assertRequest($req);
+
+$linkFile = $entries[LsDir::LINKS_FILE] ?? null;
+
+$entries = $lister->sortEntries($entries, [
+    "by" => $req->query["sort"] ?? null,
+    "dir" => $req->query["dir"] ?? null
+]);
+$entries = $lister->aggregateEntries($entries);
+$entries[LsDir::LINKS_GROUP] = $linkFile? $lister->getLinkEntries($linkFile->canonical) : null;
+
+$pageTitle = "ls $req->path/";
 ?>
 <!DOCTYPE html>
 <html>
@@ -272,14 +315,10 @@ function getRowHtml($entry) {
 }
 ?>
 
-<?php foreach ($aggregatedLs as $group => $entries) { ?>
+<?php foreach ($entries as $group => $data) { ?>
+    <?php if (!$data) { continue; } ?>
     <h1 class="group-header"><?=s($group)?></h1>
-    <?php foreach ($entries as $entry) { getRowHtml($entry); } ?>
-<?php } ?>
-
-<?php if (($links = getLinkEntries($linkPath))) { ?>
-    <h1 class="group-header">Links</h1>
-    <?php foreach ($links as $entry) { getRowHtml($entry); } ?>
+    <?php foreach ($data as $entry) { getRowHtml($entry); } ?>
 <?php } ?>
         </div>
     </body>
