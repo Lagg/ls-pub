@@ -1,27 +1,49 @@
 <?php
-//error_reporting(E_ERROR);
+// Basic init
+// Assumed vroot if given
+$virtualRoot = null;
+// If null, doc root is used
+$realRoot = null;
 
 // Set params and do basic security checks
-$pi = $_SERVER["PATH_INFO"] ?? null;
-$cwd = $_SERVER["DOCUMENT_ROOT"];
-$nwp = realpath($pi ?? $_GET["p"] ?? $cwd);
-$sort = $_GET["s"] ?? null;
-$sortDir = $_GET["d"] ?? null;
-$dir = null;
+error_reporting(E_ERROR);
 
-if ($nwp === false) {
+$virtualRoot = "/" . trim($virtualRoot? $virtualRoot : "", "/");
+$realRoot = "/" . trim($realRoot? $realRoot : $_SERVER["DOCUMENT_ROOT"], "/");
+
+$reqUri = $_SERVER["REQUEST_URI"];
+$workingUrl = parse_url($reqUri);
+$workingQuery = [];
+
+parse_str($workingUrl["query"] ?? "", $workingQuery);
+
+$reqPath = "/" . trim($workingUrl["path"] ?? "", "/");
+$realPath = $realRoot . $reqPath;
+
+// Strip vroot
+if (substr($reqPath, 0, strlen($virtualRoot)) == $virtualRoot) {
+    $realPath = $realRoot . substr($reqPath, strlen($virtualRoot));
+}
+
+// Final canonical path and 400 checks
+$realPath = realpath($realPath);
+$sort = $workingQuery["s"] ?? null;
+$sortDir = $workingQuery["d"] ?? null;
+$pageTitle = "ls $reqPath/";
+
+if ($realPath === false) {
     http_response_code(404);
     exit;
-} else if (strpos($nwp, $cwd) !== 0 || !is_readable($nwp)) {
+} else if (strpos($realPath, $realRoot) !== 0 || !is_readable($realPath)) {
     http_response_code(403);
     exit;
-} else if (!($dir = opendir($nwp))) {
+} else if (!($dir = opendir($realPath))) {
     http_response_code(400);
-    //readfile($nwp);
+    //readfile($realPath);
     exit;
 }
 
-$pageTitle = "ls " . basename($nwp);
+$linkPath = "$realPath/links.csv";
 
 // ls working dir
 $ls = [];
@@ -33,11 +55,13 @@ while (true) {
         break;
     }
 
-    $stat = stat($entry);
     $ls[$entry] = (object)[
-        "name" => $entry
+        "name" => $entry,
+        "canonical" => "$realPath/$entry",
+        "href" => "$reqPath/$entry"
     ];
 
+    $stat = stat($ls[$entry]->canonical);
     foreach (["size", "atime", "ctime", "mtime"] as $k) {
         $ls[$entry]->{$k} = $stat[$k] ?? null;
     }
@@ -115,10 +139,49 @@ uksort($aggregatedLs, function($a, $b) use ($sortKeys) {
     }
 });
 
+// Main / stuff I need to encapsulate
+function getLinkEntries($filename) {
+    $stream = fopen($filename, "r");
+    $entries = [];
+
+    if (!$stream) {
+        return $entries;
+    }
+
+    while (($line = fgetcsv($stream)) !== false) {
+        $line = array_filter(array_map("trim", $line));
+
+        if (count($line) < 2 || $line[0][0] == '#') {
+            continue;
+        }
+
+        $slug = $line[0];
+
+        if (!$slug || $slug[0] == '#') {
+            continue;
+        }
+
+        $entries[$slug] = (object)[
+            "slug" => $slug,
+            "name" => $line[2] ?? $slug,
+            "href" => $line[1],
+            "description" => $line[3] ?? null,
+        ];
+    }
+
+    fclose($stream);
+
+    return $entries;
+}
+
 // Utils
 function s(...$args) { return htmlentities(...$args); }
 function prettyDate($ts) {
-    return date("Y-m-d H:i:s T", $ts);
+    if (is_null($ts)) {
+        return "";
+    } else {
+        return date("Y-m-d H:i:s T", $ts);
+    }
 }
 function prettySize($size) {
     $b = 1;
@@ -186,27 +249,38 @@ function prettySize($size) {
     <body>
         <div id="entries">
 <?php
-function getRowHtml($pi, $entry) {
-    $href = (($pi || !is_dir($entry->name))? "" : "?p=") . $entry->name;
+function getRowHtml($entry) {
+    switch ($entry->name) {
+    case ".":
+        return null;
+        break;
+    }
+
+    $isLocal = isset($entry->mtime) && isset($entry->size);
 ?>
 <div class="entry">
-    <a class="name" href="<?=s($href)?>"><?=s($entry->name)?></a>
-<!--    <td><code><pre><?=s(json_encode($entry, JSON_PRETTY_PRINT))?></pre></code></td>-->
+    <a class="name" <?=!$isLocal? 'target="_blank" ' : ''?>href="<?=s($entry->href)?>"><?=s($entry->name)?></a>
+    <?php if (!empty($entry->description)) { ?>
+    <span class="description"><?=s($entry->description)?></span>
+    <?php } ?>
+    <?php if ($isLocal) { ?>
     <span class="mtime"><?=s(prettyDate($entry->mtime))?></span>
     <span class="size"><?=s(prettySize($entry->size))?></span>
+    <?php } ?>
 </div>
 <?php
 }
+?>
 
-foreach ($aggregatedLs as $group => $entries) {
-?>
-<h1 class="group-header"><?=s($group)?></h1>
-<?php
-    foreach ($entries as $entry) {
-        getRowHtml($pi, $entry);
-    }
-}
-?>
+<?php foreach ($aggregatedLs as $group => $entries) { ?>
+    <h1 class="group-header"><?=s($group)?></h1>
+    <?php foreach ($entries as $entry) { getRowHtml($entry); } ?>
+<?php } ?>
+
+<?php if (($links = getLinkEntries($linkPath))) { ?>
+    <h1 class="group-header">Links</h1>
+    <?php foreach ($links as $entry) { getRowHtml($entry); } ?>
+<?php } ?>
         </div>
     </body>
 </html>
