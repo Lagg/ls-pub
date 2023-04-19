@@ -338,28 +338,43 @@ function echoRowHtml($entry) {
 ?>
 <div class="entry">
     <a class="name" <?=!$isLocal? 'target="_blank" ' : ''?>href="<?=s($entry->href)?>"><?=s($entry->name)?></a>
-    <?php if (!empty($entry->description)) { ?>
+<?php
+    if (!empty($entry->description)) {
+?>
     <span class="description"><?=s($entry->description)?></span>
-    <?php } ?>
-    <?php if ($isLocal) { ?>
+<?php
+    }
+
+    if ($isLocal) {
+?>
     <span class="mtime"><?=s(prettyDate($entry->mtime))?></span>
     <span class="size"><?=s(prettySize($entry->size))?></span>
-    <?php } ?>
-</div>
 <?php
-}
-function echoEntries($entries) {
+    }
 ?>
-<div id="entries">
-    <?php foreach ($entries as $group => $data) { ?>
-        <?php if (!$data) { continue; } ?>
-        <h1 class="group-header"><?=s($group)?></h1>
-        <?php foreach ($data as $entry) { echoRowHtml($entry); } ?>
-    <?php } ?>
 </div>
 <?php
 }
 
+function echoEntries($entries) {
+?>
+<div id="entries">
+<?php
+    foreach ($entries as $group => $data) {
+        if (!$data) { continue; }
+?>
+    <h1 class="group-header"><?=s($group)?></h1>
+<?php
+        foreach ($data as $entry) {
+            echoRowHtml($entry);
+        }
+    }
+?>
+</div>
+<?php
+}
+
+// Output result
 if ($entries instanceof Exception) {
     echo "<h1 class=\"http-error\">" . s($entries->getMessage()) . "</h1>\n<h3 class=\"http-error-back\"><a href=\"" . s($lister->virtualRoot) . "\">Back</a></h3>\n";
 } else {
