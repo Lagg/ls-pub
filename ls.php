@@ -9,6 +9,20 @@ $realRoot = null;
 error_reporting(E_ERROR);
 
 // Main logic
+class HttpException extends Exception {
+    public function __construct($msg, $code=500) {
+        $this->code = (int)$code;
+
+        parent::__construct($msg);
+    }
+}
+
+class RedirectException extends HttpException {
+    public function __construct($msg, $code=null) {
+        parent::__construct($msg, $code);
+    }
+}
+
 class LsDir {
     const DEFAULT_GROUP = "Misc";
     const LINKS_GROUP = "Links";
@@ -68,24 +82,26 @@ class LsDir {
     }
 
     public function assertRequest($req) {
-        $dir = null;
-
         if ($req->realPath === false) {
-            http_response_code(404);
-            exit;
+            $rootLinks = $this->getLinkEntries($this->realRoot . "/" . self::LINKS_FILE);
+            $entry = $rootLinks[trim($req->basePath, '/')] ?? null;
+
+            if ($entry) {
+                throw new RedirectException($entry->href);
+            } else {
+                throw new HttpException("Not found", 404);
+            }
         } else if (strpos($req->realPath, $this->realRoot) !== 0 || !is_readable($req->realPath)) {
-            http_response_code(403);
-            exit;
+            throw new HttpException("Forbidden", 403);
         }
 
         $entries = $this->getEntries($req);
 
         if (is_null($entries)) {
-            http_response_code(400);
-            exit;
+            throw new HttpException("Bad filename", 400);
+        } else {
+            return $entries;
         }
-
-        return $entries;
     }
 
     public function getEntries($req) {
@@ -161,17 +177,18 @@ class LsDir {
         parse_str($workingUrl["query"] ?? "", $workingQuery);
 
         $reqPath = "/" . trim($workingUrl["path"] ?? "", "/");
-        $realPath = $this->realRoot . $reqPath;
+        $basePath = $reqPath;
 
         // Strip vroot
-        if (substr($reqPath, 0, strlen($this->virtualRoot)) == $this->virtualRoot) {
-            $realPath = $this->realRoot . substr($reqPath, strlen($this->virtualRoot));
+        if (substr($basePath, 0, strlen($this->virtualRoot)) == $this->virtualRoot) {
+            $basePath = substr($basePath, strlen($this->virtualRoot));
         }
 
-        $realPath = realpath($realPath);
+        $realPath = realpath($this->realRoot . $basePath);
 
         return (object)[
             "path" => $reqPath,
+            "basePath" => $basePath,
             "realPath" => $realPath,
             "query" => $workingQuery
         ];
@@ -230,21 +247,39 @@ function prettySize($size) {
 }
 
 // Init
+$entries = null;
+$pageTitle = "ls";
 $lister = new LsDir($realRoot, $virtualRoot);
 
-$req = $lister->resolveRequest();
-$entries = $lister->assertRequest($req);
+try {
+    $req = $lister->resolveRequest();
+    $pageTitle = "ls $req->path/";
 
-$linkFile = $entries[LsDir::LINKS_FILE] ?? null;
+    $entries = $lister->assertRequest($req);
 
-$entries = $lister->sortEntries($entries, [
-    "by" => $req->query["sort"] ?? null,
-    "dir" => $req->query["dir"] ?? null
-]);
-$entries = $lister->aggregateEntries($entries);
-$entries[LsDir::LINKS_GROUP] = $linkFile? $lister->getLinkEntries($linkFile->canonical) : null;
+    $linkFile = $entries[LsDir::LINKS_FILE] ?? null;
 
-$pageTitle = "ls $req->path/";
+    $entries = $lister->sortEntries($entries, [
+        "by" => $req->query["sort"] ?? null,
+        "dir" => $req->query["dir"] ?? null
+    ]);
+    $entries = $lister->aggregateEntries($entries);
+    $entries[LsDir::LINKS_GROUP] = $linkFile? $lister->getLinkEntries($linkFile->canonical) : null;
+} catch (Exception $ex) {
+    $isHttpException = $ex instanceof HttpException;
+    $code = $isHttpException? $ex->getCode() : 500;
+    $msg = $isHttpException? $ex->getMessage() : "Internal error";
+    $entries = $ex;
+
+    if ($code) {
+        http_response_code($code);
+    }
+
+    if ($ex instanceof RedirectException) {
+        header("Location: $msg");
+        exit;
+    }
+}
 ?>
 <!DOCTYPE html>
 <html>
@@ -290,9 +325,9 @@ $pageTitle = "ls $req->path/";
         </style>
     </head>
     <body>
-        <div id="entries">
 <?php
-function getRowHtml($entry) {
+// Formatting funcs
+function echoRowHtml($entry) {
     switch ($entry->name) {
     case ".":
         return null;
@@ -313,13 +348,23 @@ function getRowHtml($entry) {
 </div>
 <?php
 }
+function echoEntries($entries) {
 ?>
+<div id="entries">
+    <?php foreach ($entries as $group => $data) { ?>
+        <?php if (!$data) { continue; } ?>
+        <h1 class="group-header"><?=s($group)?></h1>
+        <?php foreach ($data as $entry) { echoRowHtml($entry); } ?>
+    <?php } ?>
+</div>
+<?php
+}
 
-<?php foreach ($entries as $group => $data) { ?>
-    <?php if (!$data) { continue; } ?>
-    <h1 class="group-header"><?=s($group)?></h1>
-    <?php foreach ($data as $entry) { getRowHtml($entry); } ?>
-<?php } ?>
-        </div>
+if ($entries instanceof Exception) {
+    echo "<h1 class=\"http-error\">" . s($entries->getMessage()) . "</h1>\n<h3 class=\"http-error-back\"><a href=\"" . s($lister->virtualRoot) . "\">Back</a></h3>\n";
+} else {
+    echoEntries($entries);
+}
+?>
     </body>
 </html>
