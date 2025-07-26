@@ -1,30 +1,46 @@
 <?php
 // <CONFIGURATION>
 
-// If null, doc root is used
+// Path mapping
+
+// If null, <working dir>/.cache is used
+const ROOT_CACHE = null;
+// If null, <working dir>/data is used
+const ROOT_DATA = null;
+// If null, <working dir> used
 const ROOT_REAL = null;
-
-// Assumed vroot if given
+// Assumed vroot if given which gets mapped to ROOT_REAL
 const ROOT_VIRTUAL = null;
-
-// Youtube scraping, if not given disabled
-const YOUTUBE_API_KEY = null;
-
 // File where link list is stored
-const LINKS_FILE = "links.txt";
+const FILE_LINKS = "links.txt";
+
+// API/remote conf
+
+// Tube scraping, if not given disabled
+const TUBE_API_KEY = null;
+
+// Project misc
 
 // Whether debug mode / params are supported
 const PROJECT_DEBUG = true;
-
 // Name used for titles/user-agent/etc.
 const PROJECT_NAME = "Ls'Pub";
+
+// Caching
+
+const CACHE_TTL_META = 300;
+const CACHE_TTL_TUBE = 600;
 
 // </CONFIGURATION>
 
 // <LIB>
 
 // Error handling
-class HttpException extends Exception {
+
+class LsPubException extends Exception {
+}
+
+class HttpException extends LsPubException {
     public function __construct($msg, $code=500) {
         $this->code = (int)$code;
 
@@ -39,6 +55,170 @@ class RedirectException extends HttpException {
 }
 
 // Main lib
+
+class Cache {
+    public static $cache = null;
+
+    public static function get(...$args) {
+        return self::getCache()->get(...$args);
+    }
+
+    public static function getCache() {
+        if (!self::$cache) {
+            self::$cache = new CacheBase;
+        }
+
+        return self::$cache;
+    }
+
+    public static function set(...$args) {
+        return self::getCache()->set(...$args);
+    }
+}
+
+class CacheBase extends FileBase {
+    const DEFAULT_TTL = 60;
+
+    public function __construct($dir=ROOT_CACHE) {
+        parent::__construct($dir);
+    }
+
+    public function get(string $key, $default=null) {
+        $data = parent::get($key);
+        $data = $data? unserialize($data) : $data;
+
+        $now = time();
+        $storedAt = $data->ctime ?? null;
+        $age = $now - $storedAt;
+        $ttl = $data->ttl ?? null;
+
+        if (!$storedAt || !$ttl || ($age >= $ttl)) {
+            $data = null;
+            $this->unset($key);
+        }
+
+        return $data->payload ?? $default;
+    }
+
+    public function getDefaultDir() {
+        return getcwd() . "/.cache";
+    }
+
+    public function set(string $key, $data, int $ttl=self::DEFAULT_TTL) {
+        $obj = (object)[
+            "ctime" => time(),
+            "ttl" => $ttl,
+            "payload" => $data
+        ];
+
+        return parent::set($key, serialize($obj));
+    }
+}
+
+class File {
+    public static $file = null;
+
+    public static function get(...$args) {
+        return self::getFile()->get(...$args);
+    }
+
+    public static function getFile() {
+        if (!self::$file) {
+            self::$file = new FileBase;
+        }
+
+        return self::$file;
+    }
+
+    public static function set(...$args) {
+        return self::getFile()->set(...$args);
+    }
+}
+
+
+class FileBase {
+    const MAX_KEY_LEN = 60;
+
+    protected $dir;
+
+    public function __construct($dir=ROOT_DATA) {
+        $this->dir = $dir ?? $this->getDefaultDir();
+    }
+
+    public function get(string $key, $default=null) {
+        $path = $this->getKeyPath($key);
+
+        if (is_readable($path)) {
+            return file_get_contents($path);
+        } else {
+            return $default;
+        }
+    }
+
+    public function getDefaultDir() {
+        return getcwd() . "/data";
+    }
+
+    public function init() {
+        $success = file_exists($this->dir);
+
+        if (!$success) {
+            $success = mkdir($this->dir);
+        }
+
+        if (!$success) {
+            throw new LsPubException("File dir creation error");
+        }
+
+        return $success;
+    }
+
+    public function set(string $key, string $data) {
+        $path = $this->getKeyPath($key);
+        $success = null;
+
+        $this->init();
+
+        $fp = fopen($path, "wb");
+
+        if (flock($fp, LOCK_EX)) {
+            fwrite($fp, $data);
+            fflush($fp);
+            flock($fp, LOCK_UN);
+
+            $success = true;
+        } else {
+            $success = false;
+        }
+
+        fclose($fp);
+
+        return $success;
+    }
+
+    public function unset(string $key) {
+        $path = $this->getKeyPath($key);
+
+        if (file_exists($path)) {
+            return unlink($path);
+        } else {
+            return true;
+        }
+    }
+
+    protected function getKeyPath(string $key) {
+        return "$this->dir/" . $this->sanitizeKey($key);
+    }
+
+    protected function sanitizeKey(string $key) {
+        if (strlen($key) > self::MAX_KEY_LEN || !ctype_alnum(strtr($key, "-.", "00"))) {
+            $key = sha1($key);
+        }
+
+        return $key;
+    }
+
+}
 
 class LsDir {
     const DEFAULT_TYPE = null;
@@ -67,7 +247,7 @@ class LsDir {
 
     public function __construct($realRoot, $virtualRoot=null) {
         $this->virtualRoot = "/" . trim($virtualRoot? $virtualRoot : "", "/");
-        $this->realRoot = "/" . trim($realRoot? $realRoot : $_SERVER["DOCUMENT_ROOT"], "/");
+        $this->realRoot = "/" . trim($realRoot? $realRoot : getcwd(), "/");
     }
 
     public function aggregateEntries($entries) {
@@ -87,17 +267,21 @@ class LsDir {
     }
 
     public function assertRequest($req) {
-        $rootLinks = $this->getLinkEntries($this->realRoot . "/" . LINKS_FILE);
+        $realPathMissing = $req->realPath === false;
+        $realPathIsDir = !$realPathMissing && is_dir($req->realPath);
+        $realPathReadable = !$realPathMissing && is_readable($req->realPath);
 
-        if ($req->realPath === false) {
-            $entry = $rootLinks[trim($req->basePath, '/')] ?? null;
+        $linkEntries = $realPathIsDir? $this->getLinkEntries($req->realPath . "/" . FILE_LINKS) : [];
+
+        if ($realPathMissing) {
+            $entry = $linkEntries[trim($req->basePath, '/')] ?? null;
 
             if ($entry) {
                 throw new RedirectException($entry->href);
             } else {
                 throw new HttpException("Not found", 404);
             }
-        } else if (strpos($req->realPath, $this->realRoot) !== 0 || !is_readable($req->realPath)) {
+        } else if (strpos($req->realPath, $this->realRoot) !== 0 || !$realPathReadable) {
             throw new HttpException("Forbidden", 403);
         }
 
@@ -106,7 +290,7 @@ class LsDir {
         if (is_null($entries)) {
             throw new HttpException("Bad filename", 400);
         } else {
-            $entries = array_merge($entries, $rootLinks);
+            $entries = array_merge($entries, $linkEntries);
             return $entries;
         }
     }
@@ -129,7 +313,7 @@ class LsDir {
             ];
 
             // Stat data
-            $stat = stat($entry->canonical);
+            $stat = is_readable($entry->canonical)? stat($entry->canonical) : null;
             foreach (["size", "atime", "ctime", "mtime"] as $k) {
                 $entry->{$k} = $stat[$k] ?? null;
             }
@@ -156,7 +340,7 @@ class LsDir {
     }
 
     public function getLinkEntries($realPath) {
-        $stream = fopen($realPath, "r");
+        $stream = is_readable($realPath)? fopen($realPath, "r") : null;
         $entries = [];
 
         if (!$stream) {
@@ -198,11 +382,12 @@ class LsDir {
         $reqPath = "/" . trim($workingUrl["path"] ?? "", "/");
         $basePath = $reqPath;
 
-        // Strip vroot
+        // Strip vroot from req path
         if (substr($basePath, 0, strlen($this->virtualRoot)) == $this->virtualRoot) {
             $basePath = substr($basePath, strlen($this->virtualRoot));
         }
 
+        // Map real root to vroot-less req path
         $realPath = realpath($this->realRoot . $basePath);
 
         return (object)[
@@ -214,22 +399,46 @@ class LsDir {
     }
 
     public function scrapeEntries($entries) {
-        $tube = YOUTUBE_API_KEY? new TubeScraper(YOUTUBE_API_KEY) : null;
+        $metaCkey = "meta-file";
+        $tubeCkey = "meta-tube";
+
+        $tube = TUBE_API_KEY? new TubeScraper(TUBE_API_KEY) : null;
+
+        $cfresh = false;
+        $fileMeta = Cache::get($metaCkey, []);
 
         foreach ($entries as $entry) {
-            $meta = (new MetaScraper($entry))->scrape();
+            $n = $entry->canonical ?? $entry->name;
 
-            if ($meta) {
-                $entry->header = $meta->header;
-                $entry->meta = $meta->data;
+            if (empty($fileMeta[$n])) {
+                $fileMeta[$n] = ((new MetaScraper($entry))->scrape());
+                $cfresh = $cfresh || !!$fileMeta[$n];
+            }
+
+            if ($fileMeta[$n]) {
+                $entry->header = $fileMeta[$n]->header;
+                $entry->meta = $fileMeta[$n]->data;
             }
         }
 
+        if ($cfresh) {
+            Cache::set($metaCkey, $fileMeta, CACHE_TTL_META);
+        }
+
         if ($tube) {
-            $tubeMeta = $tube->scrapeVideoMeta($entries);
+            $tubeCkey .= "-" . sha1(implode(TubeScraper::getTubeIds($entries)));
+            $tubeMeta = Cache::get($tubeCkey);
+
+            if (is_null($tubeMeta)) {
+                $tubeMeta = $tube->scrapeVideoMeta($entries);
+
+                if ($tubeMeta) {
+                    Cache::set($tubeCkey, $tubeMeta, CACHE_TTL_TUBE);
+                }
+            }
 
             foreach ($entries as $entry) {
-                $tubeId = TubeScraper::getYouTubeId($entry->href ?? null);
+                $tubeId = TubeScraper::getTubeId($entry->href ?? null);
 
                 if (!$tubeId) {
                     continue;
@@ -304,6 +513,9 @@ class LsDir {
 }
 
 class MetaScraper {
+    const ID3_APIC_TAG = "APIC";
+    const ID3_TEXT_TAG = "TXXX";
+
     const ID3_FRAME_HDR_SIZE = 10;
 
     const ID3_XHDR_FLAG = 0b01000000;
@@ -325,6 +537,11 @@ class MetaScraper {
 
     private $chunk;
     private $chunkSize;
+
+    public static $mimeExts = [
+        "image/jpeg" => "jpg",
+        "image/png" => "png"
+    ];
 
     public function __construct($entry) {
         $this->entry = $entry;
@@ -368,7 +585,7 @@ class MetaScraper {
         return rewind($this->stream);
     }
 
-    public function parseId3Frame() {
+    public function parseId3Frame($detachApics=true) {
         $this->readChunk(self::ID3_FRAME_HDR_SIZE);
 
         if ($this->chunkSize != self::ID3_FRAME_HDR_SIZE) {
@@ -386,8 +603,18 @@ class MetaScraper {
         $frame->data = self::decodeId3Text(self::unpackId3Payload($this->readChunk($frame->size)));
 
         // Per spec saying it's always a "desc string" followed by null followed by real string
-        if ($frame->id == "TXXX") {
+        if ($frame->id == self::ID3_TEXT_TAG) {
             $frame->data = self::unpackId3TextFrame($frame->data);
+        }
+
+        if ($frame->id == self::ID3_APIC_TAG) {
+            $frame->data = self::unpackId3ApicFrame($frame->data);
+
+            if ($detachApics) {
+                $apicName = (sha1($frame->data->data) . "." . $frame->data->ext);
+                File::set($apicName, $frame->data->data);
+                $frame->data->data = $apicName;
+            }
         }
 
         return $frame;
@@ -440,43 +667,45 @@ class MetaScraper {
     }
 
     public function scrape() {
-        $data = [];
-        $header = null;
-
         if (!$this->isScrapable()) {
             return null;
         }
 
+        $meta = (object)[
+            "header" => null,
+            "data" => []
+        ];
+
         $this->openFile();
 
-        if (($header = $this->parseId3Header())) {
+        if (($meta->header = $this->parseId3Header())) {
             while (($frame = $this->parseId3Frame())) {
                 $id = is_array($frame->data)? $frame->data[0] : $frame->id;
                 $val = is_array($frame->data)? $frame->data[1] ?? null : $frame->data;
 
-                if (isset($data[$id])) {
-                    if (!is_array($data[$id])) {
-                        $data[$id] = [$data[$id]];
+                if (isset($meta->data[$id])) {
+                    if (!is_array($meta->data[$id])) {
+                        $meta->data[$id] = [$meta->data[$id]];
                     }
 
-                    $data[$id][] = $val;
+                    $meta->data[$id][] = $val;
                 } else {
-                    $data[$id] = $val;
+                    $meta->data[$id] = $val;
                 }
             }
         }
 
-        if (!$header) {
+        if (!$meta->header) {
             $this->rewindFile();
 
             while(($page = $this->parseOggPage()) && $page->page < self::OGG_PAGE_MAX) {
                 if ($page->page == 0) {
-                    $header = $page;
+                    $meta->header = $page;
                 }
 
                 if (self::isOggCommentPayload($page->data)) {
                     foreach (self::unpackOggComment($page->data)->user_comment_list as $k => $v) {
-                        $data[$k] = $v;
+                        $meta->data[$k] = $v;
                     }
                 }
             }
@@ -484,7 +713,7 @@ class MetaScraper {
 
         $this->closeFile();
 
-        return (object)["header" => $header, "data" => $data];
+        return $meta;
     }
 
     public static function decodeId3Text(string $text) {
@@ -513,6 +742,41 @@ class MetaScraper {
 
     public static function isOggCommentPayload (string $data) {
         return strncmp($data, self::OGG_COMMENT_TAG, strlen(self::OGG_COMMENT_TAG)) == 0;
+    }
+
+    public static function unpackId3ApicFrame(string $data) {
+        $offset = 0;
+        $term = strpos($data, "\0", $offset);
+
+        if ($term === false) {
+            return null;
+        }
+
+        $mime = substr($data, $offset, $term - $offset);
+        $mimeExt = self::$mimeExts[$mime] ?? "bin";
+        $offset += strlen($mime) + 1;
+
+        $type = ord($data[$offset]);
+        $offset++;
+
+        $term = strpos($data, "\0", $offset);
+
+        if ($term === false) {
+            return null;
+        }
+
+        $desc = substr($data, $offset, $term - $offset);
+        $offset += (strlen($desc) + 1);
+
+        $data = substr($data, $offset);
+
+        return (object)[
+            "ext" => $mimeExt,
+            "mime" => $mime,
+            "type" => $type,
+            "desc" => $desc,
+            "data" => $data
+        ];
     }
 
     public static function unpackId3Payload(string $data) {
@@ -581,20 +845,19 @@ class TubeScraper {
     }
 
     public function scrapeVideoMeta($entriesOrLinks) {
-        if (!is_array($entriesOrLinks)) {
-            $entriesOrLinks = [$entriesOrLinks];
-        }
+        $items = [];
 
-        $entriesOrLinks = array_filter(array_map(function($link) {
-            $link = is_string($link)? $link : ($link->href ?? null);
-            return self::getYouTubeId($link);
-        }, $entriesOrLinks));
+        $entriesOrLinks = self::getTubeIds($entriesOrLinks);
+
+        if (empty($entriesOrLinks)) {
+            return $items;
+        }
 
         $idChunk = implode(",", $entriesOrLinks);
         $urlScraper = new UrlScraper();
+        $requestUrl = self::VIDEO_LIST_URL . self::VIDEO_LIST_QUERY . "&id=$idChunk&key=$this->apiKey";
 
-        $meta = json_decode($urlScraper->get(self::VIDEO_LIST_URL . self::VIDEO_LIST_QUERY . "&id=$idChunk&key=$this->apiKey"));
-        $items = [];
+        $meta = json_decode($urlScraper->get($requestUrl));
 
         foreach ($meta->items ?? [] as $item) {
             $items[$item->id] = $item;
@@ -603,7 +866,7 @@ class TubeScraper {
         return $items;
     }
 
-    public static function getYouTubeId(string $href) {
+    public static function getTubeId(string $href) {
         $url = parse_url($href);
         $host = $url["host"] ?? "";
         $query = [];
@@ -619,6 +882,21 @@ class TubeScraper {
         } else {
             return null;
         }
+    }
+
+    public static function getTubeIds($entriesOrLinks) {
+        if (!is_array($entriesOrLinks)) {
+            $entriesOrLinks = [$entriesOrLinks];
+        }
+
+        $entriesOrLinks = array_filter(array_map(function($link) {
+            $link = is_string($link)? $link : ($link->href ?? null);
+            return self::getTubeId($link);
+        }, $entriesOrLinks));
+
+        sort($entriesOrLinks);
+
+        return $entriesOrLinks;
     }
 }
 
@@ -710,11 +988,12 @@ function varDump($var) {
     }
 
     $var = (string)$var;
+    $varLen = strlen($var);
 
     if (!ctype_print($var)) {
         $newStr = "";
 
-        for ($i = 0; $i < strlen($var); $i++) {
+        for ($i = 0; $i < min($maxDumpLen, $varLen); $i++) {
             $c = $var[$i];
             $newStr .= ctype_print($c)? $c : sprintf("[%02X]", ord($c));
         }
@@ -722,10 +1001,8 @@ function varDump($var) {
         $var = $newStr;
     }
 
-    $len = strlen($var);
-
-    if ($len >= $maxDumpLen) {
-        $var = substr($var, 0, $maxDumpLen) . ("... (< " . prettySize($len) . " >)");
+    if ($varLen > $maxDumpLen) {
+        $var .= "... (< " . prettySize($varLen) . " >)";
     }
 
     return $var;
@@ -754,16 +1031,9 @@ function debugEntries($entries, $req) {
     }
 
     if (!empty($q['debug'])) {
-        foreach ($entries as $entryGroup) {
-            foreach ($entryGroup as $entry) {
-                if (!empty($entry->meta) || !empty($entry->header)) {
-                    $entry->header = varDump($entry->header ?? null);
-                    $entry->meta = varDump($entry->meta ?? null);
-                }
-            }
-        }
-
-        printf("<script>var entries = %s; console.log(entries)</script>\n", json_encode($entries, JSON_PRETTY_PRINT | JSON_PARTIAL_OUTPUT_ON_ERROR));
+        header($jsonType);
+        echo json_encode(varDump($entries), JSON_PRETTY_PRINT | JSON_PARTIAL_OUTPUT_ON_ERROR);
+        exit();
     }
 }
 
@@ -803,47 +1073,31 @@ function echoRowHtml($entry) {
 
     if (!empty($entry->header)) {
         // Expanded metadata
-        $m = array_merge($entry->meta, $entry->meta["TXXX"] ?? []);
+        $m = array_merge($entry->meta, $entry->meta[MetaScraper::ID3_TEXT_TAG] ?? []);
         $name = $m["TIT2"] ?? $m["TITLE"] ?? $name;
         $artist = $m["ARTISTSORT"] ?? $m["ALBUMARTISTSORT"] ?? $m["ARTISTS"] ?? $m["TPE1"] ?? $artist;
         $album = $m["TALB"] ?? $m["ALBUM"] ?? $album;
         $mtime = $m["ORIGINALDATE"] ?? $m["TYER"] ?? $m["originalyear"] ?? $mtime;
     }
+
+    $apicHref = $m[MetaScraper::ID3_APIC_TAG]->data ?? null;
+    if (empty($entry->thumb) && $apicHref) {
+        // TODO
+        $entry->thumb = ROOT_VIRTUAL . "data/$apicHref";
+    }
 ?>
 <tr<?=!empty($entry->slug)? ' id="' . s($entry->slug) . '"' : ''?>>
-<?php
-    if (!empty($entry->thumb)) {
-?>
-    <th class="thumb"><img src="<?=s($entry->thumb)?>" alt=""/></th>
-<?php
-    }
-?>
-    <th class="name"><a <?=empty($entry->size)? 'target="_blank" ' : ''?>href="<?=s($entry->href)?>"><?=s($name)?></a></th>
+    <th class="thumb">
+<?php if (!empty($entry->thumb)) { ?> <img src="<?=s($entry->thumb)?>" alt=""/> <?php } ?>
+    </th>
+    <th class="name"><a <?=$entry->type == LsDir::LINKS_TYPE? 'target="_blank" ' : ''?>href="<?=s($entry->href)?>"><?=s($name)?></a></th>
     <td class="description">
-<?php
-    if (!empty($entry->description)) {
-?>
-        <?=s($entry->description)?>
-<?php
-    }
+        <?=s($entry->description ?? "")?>
 
-    if ($artist) {
-        if (!empty($entry->description)) {
-?>
-            -
-<?php
-        }
-?>
-        by <em><?=s($artist)?></em>
-<?php
-    }
+        <?=s(!empty($entry->description) && (!!$artist || !!$album)? "-" : "")?>
 
-    if ($album) {
-?>
-        from <em><?=s($album)?></em>
-<?php
-    }
-?>
+        <?=$artist? ("by <em>" . s($artist) . "</em>") : ""?>
+        <?=$album? ("from <em>" . s($album) . "</em>") : ""?>
     </td>
     <td class="mtime"><?=s($mtime)?></td>
     <td class="size"><?=s(prettySize($entry->size ?? null))?></td>
