@@ -163,7 +163,7 @@ class FileBase {
         $success = file_exists($this->dir);
 
         if (!$success) {
-            $success = mkdir($this->dir);
+            $success = mkdir($this->dir, 0777, true);
         }
 
         if (!$success) {
@@ -226,7 +226,7 @@ class LsDir {
 
     const MAX_DESC_LEN = 140;
 
-    public $realRoot;
+    public $root;
     public $virtualRoot;
 
     public static $extTypes = [
@@ -245,9 +245,9 @@ class LsDir {
 
     public static $sortableFields = ["name", "type", "description", "size", "ctime", "atime", "mtime"];
 
-    public function __construct($realRoot, $virtualRoot=null) {
-        $this->virtualRoot = "/" . trim($virtualRoot? $virtualRoot : "", "/");
-        $this->realRoot = "/" . trim($realRoot? $realRoot : getcwd(), "/");
+    public function __construct(string $root, string $virtualRoot=null) {
+        $this->root = $root;
+        $this->virtualRoot = $virtualRoot ?? $this->root;
     }
 
     public function aggregateEntries($entries) {
@@ -266,39 +266,14 @@ class LsDir {
         return $aggregated;
     }
 
-    public function assertRequest($req) {
-        $realPathMissing = $req->realPath === false;
-        $realPathIsDir = !$realPathMissing && is_dir($req->realPath);
-        $realPathReadable = !$realPathMissing && is_readable($req->realPath);
-
-        $linkEntries = $realPathIsDir? $this->getLinkEntries($req->realPath . "/" . FILE_LINKS) : [];
-
-        if ($realPathMissing) {
-            $entry = $linkEntries[trim($req->basePath, '/')] ?? null;
-
-            if ($entry) {
-                throw new RedirectException($entry->href);
-            } else {
-                throw new HttpException("Not found", 404);
-            }
-        } else if (strpos($req->realPath, $this->realRoot) !== 0 || !$realPathReadable) {
-            throw new HttpException("Forbidden", 403);
-        }
-
-        $entries = $this->getEntries($req);
-
-        if (is_null($entries)) {
-            throw new HttpException("Bad filename", 400);
-        } else {
-            $entries = array_merge($entries, $linkEntries);
-            return $entries;
-        }
-    }
-
-    public function getEntries($req) {
+    public function getEntries() {
         $ls = [];
 
-        $dir = opendir($req->realPath);
+        if (!$this->root || !is_dir($this->root)) {
+            return null;
+        }
+
+        $dir = opendir($this->root);
 
         if (!$dir) {
             return null;
@@ -308,8 +283,8 @@ class LsDir {
             // Basic info/path building
             $entry = (object)[
                 "name" => $name,
-                "canonical" => "$req->realPath/$name",
-                "href" => "$req->path/$name"
+                "canonical" => "$this->root/$name",
+                "href" => "$this->virtualRoot/$name"
             ];
 
             // Stat data
@@ -337,65 +312,6 @@ class LsDir {
         closedir($dir);
 
         return $ls;
-    }
-
-    public function getLinkEntries($realPath) {
-        $stream = is_readable($realPath)? fopen($realPath, "r") : null;
-        $entries = [];
-
-        if (!$stream) {
-            return $entries;
-        }
-
-        while (($line = fgetcsv($stream)) !== false) {
-            $line = array_filter(array_map(function($field) {
-                return trim((string)$field);
-            }, $line));
-
-            if (count($line) < 2 || $line[0][0] == '#') {
-                continue;
-            }
-
-            $slug = $line[0];
-
-            $entries[$slug] = (object)[
-                "type" => self::LINKS_TYPE,
-                "slug" => $slug,
-                "name" => $line[2] ?? $slug,
-                "href" => $line[1],
-                "description" => $line[3] ?? null,
-            ];
-        }
-
-        fclose($stream);
-
-        return $entries;
-    }
-
-    public function resolveRequest() {
-        $reqUri = $_SERVER["REQUEST_URI"];
-        $workingUrl = parse_url($reqUri);
-        $workingQuery = [];
-
-        parse_str($workingUrl["query"] ?? "", $workingQuery);
-
-        $reqPath = "/" . trim($workingUrl["path"] ?? "", "/");
-        $basePath = $reqPath;
-
-        // Strip vroot from req path
-        if (substr($basePath, 0, strlen($this->virtualRoot)) == $this->virtualRoot) {
-            $basePath = substr($basePath, strlen($this->virtualRoot));
-        }
-
-        // Map real root to vroot-less req path
-        $realPath = realpath($this->realRoot . $basePath);
-
-        return (object)[
-            "path" => $reqPath,
-            "basePath" => $basePath,
-            "realPath" => $realPath,
-            "query" => $workingQuery
-        ];
     }
 
     public function scrapeEntries($entries) {
@@ -509,6 +425,110 @@ class LsDir {
         }
 
         return $desc;
+    }
+}
+
+class LsRequest {
+    public string $realRoot;
+    public string $virtualRoot;
+
+    // Path sent to server/app slightly sanitized
+    public string $path;
+    // Path with vroot stripped
+    public string $basePath;
+    // Filesystem path
+    public string $realPath;
+    // Query string opts
+    public array $query = [];
+
+    private $linkEntries = null;
+
+    public function __construct($realRoot, $virtualRoot) {
+        $this->realRoot = '/' . trim($realRoot, '/');
+        $this->virtualRoot = '/' . trim($virtualRoot, '/');
+
+        $this->resolveRequest();
+    }
+
+    public function assertRequest() {
+        $realPathMissing = empty($this->realPath);
+        $realPathReadable = !$realPathMissing && is_readable($this->realPath);
+
+        if ($realPathMissing) {
+            $entry = $this->getLinkEntries()[trim($this->basePath, '/')] ?? null;
+
+            if ($entry) {
+                throw new RedirectException($entry->href);
+            } else {
+                throw new HttpException("Not found", 404);
+            }
+        } else if (strpos($this->realPath, $this->realRoot) !== 0 || !$realPathReadable) {
+            throw new HttpException("Forbidden", 403);
+        } else {
+            return true;
+        }
+    }
+
+    public function getLinkEntries() {
+        if ($this->linkEntries) {
+            return $this->linkEntries;
+        }
+
+        $realPath = ($this->realPath? $this->realPath : $this->realRoot) . "/" . FILE_LINKS;
+
+        $stream = is_readable($realPath)? fopen($realPath, "r") : null;
+        $entries = [];
+
+        if (!$stream) {
+            return $entries;
+        }
+
+        while (($line = fgetcsv($stream)) !== false) {
+            $line = array_map(function($field) {
+                return trim((string)$field);
+            }, $line);
+
+            $link = $line[0] ?? "";
+            $name = $line[1] ?? "";
+            $desc = $line[2] ?? "";
+            $slug = $line[3] ?? "l" . crc32($link);
+
+            if (!$link || $link[0] == '#') {
+                continue;
+            }
+
+            $entries[$slug] = (object)[
+                "type" => LsDir::LINKS_TYPE,
+                "href" => $link,
+                "name" => $name,
+                "description" => $desc,
+                "slug" => $slug,
+            ];
+        }
+
+        fclose($stream);
+
+        return ($this->linkEntries = $entries);
+    }
+
+    public function resolveRequest() {
+        $reqUri = $_SERVER["REQUEST_URI"];
+        $workingUrl = parse_url($reqUri);
+
+        parse_str($workingUrl["query"] ?? "", $this->query);
+
+        $this->path = "/" . trim($workingUrl["path"] ?? "", "/");
+        $this->basePath = $this->path;
+
+        // Strip vroot from req path
+        if (substr($this->basePath, 0, strlen($this->virtualRoot)) == $this->virtualRoot) {
+            $this->basePath = substr($this->basePath, strlen($this->virtualRoot));
+        }
+
+        // Map real root to vroot-less req path
+        $this->realPath = realpath($this->realRoot . $this->basePath);
+
+        return $this->assertRequest();
     }
 }
 
@@ -1114,13 +1134,15 @@ error_reporting(PROJECT_DEBUG? E_ALL : 0);
 $entries = null;
 $pageTitle = "ls";
 $req = null;
-$lister = new LsDir(ROOT_REAL, ROOT_VIRTUAL);
+$lister = null;
 
 try {
-    $req = $lister->resolveRequest();
+    $req = new LsRequest(ROOT_REAL, ROOT_VIRTUAL);
+    $lister = new LsDir($req->realPath, $req->path);
+
     $pageTitle .= " $req->path/";
 
-    $entries = $lister->assertRequest($req);
+    $entries = array_merge($req->getLinkEntries(), $lister->getEntries());
 
     $entries = $lister->scrapeEntries($entries);
 
