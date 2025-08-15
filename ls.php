@@ -26,6 +26,8 @@ const PROJECT_DEBUG = true;
 // Name used for titles/user-agent/etc.
 const PROJECT_NAME = "Ls'Pub";
 
+const PROJECT_URL = "https://lagg.me" . ROOT_VIRTUAL;
+
 // Caching
 
 const CACHE_TTL_META = 300;
@@ -220,14 +222,11 @@ class FileBase {
 
 }
 
-class LsDir {
+class Entries {
     const DEFAULT_TYPE = null;
     const LINKS_TYPE = "url";
 
     const MAX_DESC_LEN = 140;
-
-    public $root;
-    public $virtualRoot;
 
     public static $extTypes = [
         "audio" => ["mp3", "ogg", "flac"],
@@ -245,12 +244,8 @@ class LsDir {
 
     public static $sortableFields = ["name", "type", "description", "size", "ctime", "atime", "mtime"];
 
-    public function __construct(string $root, string $virtualRoot=null) {
-        $this->root = $root;
-        $this->virtualRoot = $virtualRoot ?? $this->root;
-    }
 
-    public function aggregateEntries($entries) {
+    public function aggregate($entries) {
         $aggregated = array_fill_keys(self::$extLabels, []);
 
         foreach ($entries as $entry) {
@@ -266,46 +261,51 @@ class LsDir {
         return $aggregated;
     }
 
-    public function getEntries() {
+    public function create(string $realPath, string $virtualRoot) {
+        // Basic info/path building
+        $entry = (object)[
+            "name" => basename($realPath),
+            "canonical" => $realPath,
+        ];
+
+        // Stat data
+        $stat = is_readable($entry->canonical)? stat($entry->canonical) : null;
+        foreach (["size", "atime", "ctime", "mtime"] as $k) {
+            $entry->{$k} = $stat[$k] ?? null;
+        }
+
+        // Basic typing to know when to header-scrape
+        $lastDot = strrpos($entry->name, ".");
+        $entry->ext = $lastDot? trim(strtolower(substr($entry->name, $lastDot + 1))) : null;
+        $entry->type = null;
+
+        foreach (self::$extTypes as $type => $exts) {
+            if (in_array($entry->ext, $exts)) {
+                $entry->type = $type;
+                break;
+            }
+        }
+
+        $entry->href = "$virtualRoot/$entry->name";
+
+        return $entry;
+    }
+
+    public function get(string $realRoot, string $virtualRoot) {
         $ls = [];
 
-        if (!$this->root || !is_dir($this->root)) {
+        if (!$realRoot || !is_dir($realRoot)) {
             return null;
         }
 
-        $dir = opendir($this->root);
+        $dir = opendir($realRoot);
 
         if (!$dir) {
             return null;
         }
 
         while (($name = readdir($dir)) !== false) {
-            // Basic info/path building
-            $entry = (object)[
-                "name" => $name,
-                "canonical" => "$this->root/$name",
-                "href" => "$this->virtualRoot/$name"
-            ];
-
-            // Stat data
-            $stat = is_readable($entry->canonical)? stat($entry->canonical) : null;
-            foreach (["size", "atime", "ctime", "mtime"] as $k) {
-                $entry->{$k} = $stat[$k] ?? null;
-            }
-
-            // Basic typing to know when to header-scrape
-            $lastDot = strrpos($name, ".");
-            $entry->ext = $lastDot? trim(strtolower(substr($name, $lastDot + 1))) : null;
-            $entry->type = null;
-
-            foreach (self::$extTypes as $type => $exts) {
-                if (in_array($entry->ext, $exts)) {
-                    $entry->type = $type;
-                    break;
-                }
-            }
-
-            // Add to ls
+            $entry = $this->create("$realRoot/$name", $virtualRoot);
             $ls[$entry->name] = $entry;
         }
 
@@ -314,7 +314,7 @@ class LsDir {
         return $ls;
     }
 
-    public function scrapeEntries($entries) {
+    public function scrape($entries) {
         $metaCkey = "meta-file";
         $tubeCkey = "meta-tube";
 
@@ -383,7 +383,7 @@ class LsDir {
         return $entries;
     }
 
-    public function sortEntries($entries, $opts=[]) {
+    public function sort($entries, $opts=[]) {
         $sortSet = isset($opts["by"]);
         $sort = $opts["by"] ?? self::$sortableFields[0] ?? null;
         $sortDir = $opts["dir"] ?? null;
@@ -429,6 +429,14 @@ class LsDir {
 }
 
 class LsRequest {
+    const DIR_INDEX_NAME = "index";
+
+    const OUT_ATOM = "atom";
+    const OUT_HTML = "html";
+    const OUT_JSON = "json";
+    const OUT_RSS = "rss";
+    const OUT_TEXT = "txt";
+
     public string $realRoot;
     public string $virtualRoot;
 
@@ -441,21 +449,27 @@ class LsRequest {
     // Query string opts
     public array $query = [];
 
+    public string $outputFormat = self::OUT_HTML;
+    public bool $outputFormatSane = false;
+
     private $linkEntries = null;
 
-    public function __construct($realRoot, $virtualRoot) {
-        $this->realRoot = '/' . trim($realRoot, '/');
-        $this->virtualRoot = '/' . trim($virtualRoot, '/');
+    public static $outputExts = [self::OUT_ATOM, self::OUT_HTML, self::OUT_JSON, self::OUT_RSS, self::OUT_TEXT];
 
-        $this->resolveRequest();
+    public function __construct($realRoot, $virtualRoot) {
+        $this->realRoot = pnorm($realRoot);
+        $this->virtualRoot = pnorm($virtualRoot);
+
+        $this->resolve();
     }
 
-    public function assertRequest() {
+    public function assert() {
         $realPathMissing = empty($this->realPath);
+        $realPathDir = !$realPathMissing && is_dir($this->realPath);
         $realPathReadable = !$realPathMissing && is_readable($this->realPath);
 
         if ($realPathMissing) {
-            $entry = $this->getLinkEntries()[trim($this->basePath, '/')] ?? null;
+            $entry = $this->getLinkEntries()[pnorm($this->basePath, null)] ?? null;
 
             if ($entry) {
                 throw new RedirectException($entry->href);
@@ -464,6 +478,8 @@ class LsRequest {
             }
         } else if (strpos($this->realPath, $this->realRoot) !== 0 || !$realPathReadable) {
             throw new HttpException("Forbidden", 403);
+        } else if (!$this->outputFormatSane) {
+            throw new HttpException("Bad Request", 400);
         } else {
             return true;
         }
@@ -474,7 +490,7 @@ class LsRequest {
             return $this->linkEntries;
         }
 
-        $realPath = ($this->realPath? $this->realPath : $this->realRoot) . "/" . FILE_LINKS;
+        $realPath = (empty($this->realPath)? $this->realRoot : $this->realPath) . "/" . FILE_LINKS;
 
         $stream = is_readable($realPath)? fopen($realPath, "r") : null;
         $entries = [];
@@ -498,7 +514,7 @@ class LsRequest {
             }
 
             $entries[$slug] = (object)[
-                "type" => LsDir::LINKS_TYPE,
+                "type" => Entries::LINKS_TYPE,
                 "href" => $link,
                 "name" => $name,
                 "description" => $desc,
@@ -511,24 +527,58 @@ class LsRequest {
         return ($this->linkEntries = $entries);
     }
 
-    public function resolveRequest() {
+    public function resolve() {
         $reqUri = $_SERVER["REQUEST_URI"];
         $workingUrl = parse_url($reqUri);
 
         parse_str($workingUrl["query"] ?? "", $this->query);
 
-        $this->path = "/" . trim($workingUrl["path"] ?? "", "/");
-        $this->basePath = $this->path;
+        $this->expandPath($workingUrl["path"] ?? "");
+    }
 
-        // Strip vroot from req path
-        if (substr($this->basePath, 0, strlen($this->virtualRoot)) == $this->virtualRoot) {
-            $this->basePath = substr($this->basePath, strlen($this->virtualRoot));
+    public function stripVirtualRoot(string $path) {
+        $vlen = strlen($this->virtualRoot);
+        if (substr($path, 0, $vlen) == $this->virtualRoot) {
+            return substr($path, $vlen);
+        } else {
+            return $path;
+        }
+    }
+
+    protected function expandPath(string $path) {
+        // Start with path minus vroot
+        $this->path = pnorm($path);
+        $this->basePath = pnorm($this->stripVirtualRoot($this->path));
+
+        // Attempt to see if absolute filename exists
+        if (($this->realPath = realpath($this->realRoot . $this->basePath))) {
+            $this->outputFormatSane = true;
+            return;
         }
 
-        // Map real root to vroot-less req path
-        $this->realPath = realpath($this->realRoot . $this->basePath);
+        // If not try again after hint parse
+        $extDot = strrpos($this->basePath, '.');
+        $ext = $extDot !== false? strtolower(substr($this->basePath, $extDot + 1)) : null;
 
-        return $this->assertRequest();
+        if (!in_array($ext, LsRequest::$outputExts)) {
+            return;
+        } else {
+            $this->outputFormat = $ext;
+            $this->basePath = substr($this->basePath, 0, $extDot);
+        }
+
+        // Sanity check for index hints that actually make sense
+        $isIndex = (basename($this->basePath) == self::DIR_INDEX_NAME);
+
+        if ($isIndex) {
+            $this->basePath = substr($this->basePath, 0, -(strlen(self::DIR_INDEX_NAME) + 1));
+        }
+
+        $this->path = $this->virtualRoot . $this->basePath;
+        $this->realPath = realpath($this->realRoot . $this->basePath);
+        $isDir = $this->realPath && is_dir($this->realPath);
+
+        $this->outputFormatSane = !$isDir || ($isDir && $isIndex);
     }
 }
 
@@ -898,7 +948,7 @@ class TubeScraper {
         if ($isBigLink) {
             return $query["v"] ?? null;
         } else if ($isSmallLink) {
-            return trim($url["path"] ?? "", "/");
+            return pnorm($url["path"] ?? "", null);
         } else {
             return null;
         }
@@ -988,6 +1038,10 @@ function prettySize($size) {
     }
 }
 
+function pnorm($path, $root='/') {
+    return $root . trim($path, '/');
+}
+
 function s(...$args) {
     return htmlentities(implode(" ", $args));
 }
@@ -1030,44 +1084,307 @@ function varDump($var) {
 
 // Page output funcs
 
-function debugEntries($entries, $req) {
-    if (!PROJECT_DEBUG) {
-        return null;
+class LsOutput {
+    public static $censoredDumpKeys = ["[canonical]"];
+
+    protected $stdout;
+    protected string $title = "";
+
+    public function dumpEntry($entry) {
+        $flattened = [];
+        $this->flattenVar($flattened, $entry);
+
+        foreach ($flattened as $k => $v) {
+            fputcsv($this->stdout, [$k, $v]);
+        }
     }
 
-    $jsonType = "Content-Type: application/json";
-    $q = $req->query ?? [];
-
-    if (!empty($q['headers'])) {
-        header($jsonType);
-        echo json_encode(UrlScraper::getRequestHeaders(), JSON_PRETTY_PRINT);
-        exit();
+    public function flush() {
+        fclose($this->stdout);
     }
 
-    if (!empty($q['htest'])) {
-        header($jsonType);
-        echo (new UrlScraper())->get("https://lagg.me/pub?headers=1");
-        exit();
+    public function getContentType() {
+        return "text/plain";
     }
 
-    if (!empty($q['debug'])) {
-        header($jsonType);
-        echo json_encode(varDump($entries), JSON_PRETTY_PRINT | JSON_PARTIAL_OUTPUT_ON_ERROR);
-        exit();
+    public function init() {
+        $this->stdout = fopen("php://output", "wb");
+    }
+
+    public function setTitle(string $title) {
+        $this->title = $title;
+    }
+
+    public function writeEntries($entries) {
+        foreach ($entries as $group => $data) {
+            $this->writeEntryGroup($group, $data);
+        }
+    }
+
+    public function writeEntry($entry) {
+        $c = self::condenseEntry($entry);
+        $name = $c->name ?? $entry->name;
+        $desc = $entry->description ?? "";
+        $thumb = $c->thumb ?? "";
+
+        if ($c->artist) {
+            $desc .= " by $c->artist";
+        }
+
+        if ($c->album) {
+            $desc .= " from $c->album";
+        }
+
+        $fields = array_map(function($f) {
+            return trim((string)$f);
+        }, [$entry->type, $entry->href, $name, $desc, $thumb]);
+
+        fputcsv($this->stdout, $fields);
+    }
+
+    public function writeEntryGroup(string $group, array $data) {
+        if (empty($data)) {
+            return;
+        }
+
+        $this->writeEntryGroupHeader($group);
+
+        foreach ($data as $entry) {
+            $this->writeEntry($entry);
+        }
+
+        $this->writeEntryGroupFooter($group);
+    }
+
+    public function writeEntryGroupFooter(string $group) {
+        fputs($this->stdout, "## /$group\n");
+    }
+
+    public function writeEntryGroupHeader(string $group) {
+        fputs($this->stdout, "## $group\n");
+    }
+
+    public function writeException(Exception $ex) {
+        fputs($this->stdout, "## ERROR: " . $ex->getMessage() . "\n");
+    }
+
+    public function writeFooter() {
+        fputs($this->stdout, "# /$this->title\n");
+    }
+
+    public function writeHeader() {
+        fputs($this->stdout, "# $this->title\n");
+    }
+
+    public static function condenseEntry($entry) {
+        $m = array_merge($entry->meta ?? [], $entry->meta[MetaScraper::ID3_TEXT_TAG] ?? []);
+        $apicHref = $m[MetaScraper::ID3_APIC_TAG]->data ?? null;
+
+        $name = $entry->name;
+        $artist = $entry->meta["channelName"] ?? "";
+        $album = "";
+        $mtime = prettyDate($entry->mtime ?? $entry->ctime ?? null);
+        $thumb = $entry->thumb ?? null;
+
+        // Expanded metadata
+        $name = $m["TIT2"] ?? $m["TITLE"] ?? $name;
+        $artist = $m["ARTISTSORT"] ?? $m["ALBUMARTISTSORT"] ?? $m["ARTISTS"] ?? $m["TPE1"] ?? $artist;
+        $album = $m["TALB"] ?? $m["ALBUM"] ?? $album;
+        $mtime = $m["ORIGINALDATE"] ?? $m["TYER"] ?? $m["originalyear"] ?? $mtime;
+        $thumb = $apicHref? (ROOT_VIRTUAL . "data/$apicHref") : $thumb; // TODO
+
+        return (object)[
+            "name" => $name,
+            "artist" => $artist,
+            "album" => $album,
+            "mtime" => $mtime,
+            "thumb" => $thumb
+        ];
+    }
+
+    protected function flattenVar(&$flattened, $var, $keyPrefix="") {
+        if (is_null($var) || is_scalar($var)) {
+            $flattened[$keyPrefix] = in_array($keyPrefix, self::$censoredDumpKeys)? "<CENSORED>" : varDump($var);
+            return;
+        }
+
+        if (is_object($var)) {
+            $var = get_object_vars($var);
+        }
+
+        foreach ($var as $k => $v) {
+            $this->flattenVar($flattened, $v, $keyPrefix . ($keyPrefix? "." : "") . "[$k]");
+        }
     }
 }
 
-function echoEntries($entries) {
-    if ($entries instanceof Exception) {
+class OutputAtom extends LsOutput {
+    public function dumpEntry($entry) {
+        $thumb = $ce->thumb ?? null;
+        $flattened = [];
+        $this->flattenVar($flattened, $entry);
 ?>
-        <h1 class="http-error"><?=s($entries->getMessage())?></h1>
-        <h3 class="http-error-back"><a href="<?=s(ROOT_VIRTUAL)?>">Back</a></h3>
+    <entry>
+        <title><?=s($entry->name ?? "")?></title>
+        <updated><?=date(DATE_ATOM, $entry->mtime ?? 0)?></updated>
 <?php
-        return;
+        if ($thumb) {
+?>
+        <link rel="enclosure" href="<?=s($thumb)?>"/>
+<?php
+        }
+?>
+        <content type="xhtml">
+<?php
+        foreach ($flattened as $k => $v) {
+            echo s($k) . " = " . s($v) . "\n<br/>";
+        }
+?>
+        </content>
+    </entry>
+<?php
     }
 
-    foreach ($entries as $group => $data) {
-        if (!$data) { continue; }
+    public function getContentType() {
+        return "application/xml";
+    }
+
+    public function writeEntry($entry) {
+        $ce = self::condenseEntry($entry);
+        $desc = $entry->description ?? "";
+        $href = $entry->href;
+        $isExternalLink = $entry->type == Entries::LINKS_TYPE;
+        $size = prettySize($entry->size ?? null);
+        $mtime = $entry->mtime ?? time();
+        $id = sha1($entry->slug ?? null . $ce->name . PROJECT_URL . $size);
+?>
+    <entry>
+        <title><?=s($ce->name)?></title>
+        <link href="<?=s($href)?>"/>
+        <id>urn:sha1:<?=s($id)?></id>
+        <updated><?=date(DATE_ATOM, $mtime)?></updated>
+<?php
+        if ($ce->thumb) {
+?>
+        <link rel="enclosure" href="<?=s($ce->thumb)?>"/>
+<?php
+        }
+?>
+        <summary>
+            <?=htmlentities($desc, ENT_QUOTES | ENT_SUBSTITUTE | ENT_XML1)?>
+
+            <?=s($desc && ($ce->artist || $ce->album)? "-" : "")?>
+
+            <?=$ce->artist? ("by " . s($ce->artist)) : ""?>
+            <?=$ce->album? ("from " . s($ce->album)) : ""?>
+        </summary>
+    </entry>
+<?php
+    }
+
+    public function writeEntryGroupFooter(string $group) {
+?>
+    <!-- /<?=s($group)?> -->
+<?php
+    }
+
+    public function writeEntryGroupHeader(string $group) {
+?>
+    <!-- <?=s($group)?> -->
+<?php
+    }
+
+    public function writeException(Exception $ex) {
+?>
+        <pre class="http-error"><?=s($ex->getTraceAsString())?></pre>
+<?php
+    }
+
+    public function writeHeader() {
+        $updated = time();
+        $id = sha1(PROJECT_NAME . PROJECT_URL);
+?>
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+    <title><?=s($this->title)?></title>
+    <link href="<?=s(PROJECT_URL)?>"/>
+    <updated><?=date(DATE_ATOM, $updated)?></updated>
+    <author><name><?=s(PROJECT_NAME)?></name></author>
+    <id>urn:sha1:<?=s($id)?></id>
+<?php
+    }
+
+    public function writeFooter() {
+?>
+</feed>
+<?php
+    }
+}
+
+class OutputHtml extends LsOutput {
+    public function dumpEntry($entry) {
+        $flattened = [];
+        $this->flattenVar($flattened, $entry);
+?>
+<table class="entries">
+    <tbody>
+<?php
+        foreach ($flattened as $k => $v) {
+?>
+        <tr><th><?=s($k)?><td><code><?=s($v)?></code></td></tr>
+<?php
+        }
+?>
+    </tbody>
+</table>
+<?php
+    }
+
+    public function getContentType() {
+        return null;
+    }
+
+    public function writeEntry($entry) {
+        $ce = self::condenseEntry($entry);
+        $desc = $entry->description ?? "";
+        $href = $entry->href;
+        $id = $entry->slug ?? null;
+        $isExternalLink = $entry->type == Entries::LINKS_TYPE;
+        $size = prettySize($entry->size ?? null)
+?>
+    <tr<?=$id? (' id="' . s($id) . '"') : ''?>>
+        <th class="thumb">
+<?php
+            if ($ce->thumb) {
+?>
+            <img src="<?=s($ce->thumb)?>" alt=""/>
+<?php
+            }
+?>
+        </th>
+        <th class="name"><a <?=$isExternalLink? 'target="_blank" ' : ''?>href="<?=s($href)?>"><?=s($ce->name)?></a></th>
+        <td class="description">
+            <?=s($desc)?>
+
+            <?=s($desc && ($ce->artist || $ce->album)? "-" : "")?>
+
+            <?=$ce->artist? ("by <em>" . s($ce->artist) . "</em>") : ""?>
+            <?=$ce->album? ("from <em>" . s($ce->album) . "</em>") : ""?>
+        </td>
+        <td class="mtime"><?=s($ce->mtime)?></td>
+        <td class="size"><?=s($size)?></td>
+    </tr>
+<?php
+    }
+
+    public function writeEntryGroupFooter(string $group) {
+?>
+            </tbody>
+        </table>
+<?php
+    }
+
+    public function writeEntryGroupHeader(string $group) {
         $saneGroup = s($group);
         $saneGroupHref = strtolower($saneGroup);
 ?>
@@ -1075,105 +1392,21 @@ function echoEntries($entries) {
             <caption id="<?=$saneGroupHref?>"><a href="#<?=$saneGroupHref?>">#</a><?=$saneGroup?></caption>
             <tbody>
 <?php
-                foreach ($data as $entry) {
-                    echoRowHtml($entry);
-                }
+    }
+
+    public function writeException(Exception $ex) {
 ?>
-            </tbody>
-        </table>
+        <h1 class="http-error"><?=s($ex->getMessage())?></h1>
+        <h3 class="http-error-back"><a href="<?=s(ROOT_VIRTUAL)?>">Back</a></h3>
 <?php
     }
-}
 
-function echoRowHtml($entry) {
-    $artist = $entry->meta["channelName"] ?? "";
-    $album = "";
-    $name = $entry->name;
-    $mtime = prettyDate($entry->mtime ?? $entry->ctime ?? null);
-
-    if (!empty($entry->header)) {
-        // Expanded metadata
-        $m = array_merge($entry->meta, $entry->meta[MetaScraper::ID3_TEXT_TAG] ?? []);
-        $name = $m["TIT2"] ?? $m["TITLE"] ?? $name;
-        $artist = $m["ARTISTSORT"] ?? $m["ALBUMARTISTSORT"] ?? $m["ARTISTS"] ?? $m["TPE1"] ?? $artist;
-        $album = $m["TALB"] ?? $m["ALBUM"] ?? $album;
-        $mtime = $m["ORIGINALDATE"] ?? $m["TYER"] ?? $m["originalyear"] ?? $mtime;
-    }
-
-    $apicHref = $m[MetaScraper::ID3_APIC_TAG]->data ?? null;
-    if (empty($entry->thumb) && $apicHref) {
-        // TODO
-        $entry->thumb = ROOT_VIRTUAL . "data/$apicHref";
-    }
-?>
-<tr<?=!empty($entry->slug)? ' id="' . s($entry->slug) . '"' : ''?>>
-    <th class="thumb">
-<?php if (!empty($entry->thumb)) { ?> <img src="<?=s($entry->thumb)?>" alt=""/> <?php } ?>
-    </th>
-    <th class="name"><a <?=$entry->type == LsDir::LINKS_TYPE? 'target="_blank" ' : ''?>href="<?=s($entry->href)?>"><?=s($name)?></a></th>
-    <td class="description">
-        <?=s($entry->description ?? "")?>
-
-        <?=s(!empty($entry->description) && (!!$artist || !!$album)? "-" : "")?>
-
-        <?=$artist? ("by <em>" . s($artist) . "</em>") : ""?>
-        <?=$album? ("from <em>" . s($album) . "</em>") : ""?>
-    </td>
-    <td class="mtime"><?=s($mtime)?></td>
-    <td class="size"><?=s(prettySize($entry->size ?? null))?></td>
-</tr>
-<?php
-}
-
-// </UTILS>
-
-// <MAIN>
-
-error_reporting(PROJECT_DEBUG? E_ALL : 0);
-
-$entries = null;
-$pageTitle = "ls";
-$req = null;
-$lister = null;
-
-try {
-    $req = new LsRequest(ROOT_REAL, ROOT_VIRTUAL);
-    $lister = new LsDir($req->realPath, $req->path);
-
-    $pageTitle .= " $req->path/";
-
-    $entries = array_merge($req->getLinkEntries(), $lister->getEntries());
-
-    $entries = $lister->scrapeEntries($entries);
-
-    $entries = $lister->sortEntries($entries, [
-        "by" => $req->query["sort"] ?? null,
-        "dir" => $req->query["dir"] ?? null
-    ]);
-
-    $entries = $lister->aggregateEntries($entries);
-
-    debugEntries($entries, $req);
-} catch (Exception $ex) {
-    $isHttpException = $ex instanceof HttpException;
-    $code = $isHttpException? $ex->getCode() : 500;
-    $msg = $isHttpException? $ex->getMessage() : "Internal error";
-    $entries = $ex;
-
-    if ($code) {
-        http_response_code($code);
-    }
-
-    if ($ex instanceof RedirectException) {
-        header("Location: $msg");
-        exit();
-    }
-}
+    public function writeHeader() {
 ?>
 <!DOCTYPE html>
 <html lang="en">
     <head>
-        <title><?=s($pageTitle)?></title>
+        <title><?=s($this->title)?></title>
         <link rel="stylesheet" type="text/css" href="/style.css"/>
         <style>
             .entries {
@@ -1220,10 +1453,189 @@ try {
         </style>
     </head>
     <body>
-    <?=s(echoEntries($entries))?>
+<?php
+    }
+
+    public function writeFooter() {
+?>
     </body>
 </html>
 <?php
+    }
+}
+
+class OutputJson extends LsOutput {
+    const JS_FLAGS = JSON_PRETTY_PRINT | JSON_PARTIAL_OUTPUT_ON_ERROR;
+
+    private $obj = [];
+    private $errors = [];
+
+    public function dumpEntry($entry) {
+        $flattened = [];
+        $this->flattenVar($flattened, $entry);
+        echo json_encode($flattened, self::JS_FLAGS);
+    }
+
+    public function flush() {
+        if (!empty($this->obj) || !empty($this->errors)) {
+            echo json_encode(array_filter([
+                "entries" => $this->obj,
+                "errors" => $this->errors
+            ]), self::JS_FLAGS);
+        }
+
+        $this->obj = [];
+        $this->errors = [];
+    }
+
+    public function getContentType() {
+        return "application/json";
+    }
+
+    public function init() {
+        $this->errors = [];
+        $this->obj = [];
+    }
+
+    public function writeEntry($entry) {
+        $c = self::condenseEntry($entry);
+        $this->obj[] = $c;
+    }
+
+    public function writeEntryGroupFooter(string $group) {
+    }
+
+    public function writeEntryGroupHeader(string $group) {
+    }
+
+    public function writeException(Exception $ex) {
+        $this->errors[] = $ex->getTrace();
+    }
+
+    public function writeFooter() {
+    }
+
+    public function writeHeader() {
+    }
+}
+
+// </UTILS>
+
+// <MAIN>
+
+class Main {
+    private ?Entries $dir = null;
+    private ?LsOutput $out = null;
+
+    public function getEntries(LsRequest $req) {
+        $entries = array_merge($req->getLinkEntries(), $this->dir->get($req->realPath, $req->path));
+
+        $entries = $this->dir->scrape($entries);
+
+        $entries = $this->dir->sort($entries, [
+            "by" => $req->query["sort"] ?? null,
+            "dir" => $req->query["dir"] ?? null
+        ]);
+
+        $entries = $this->dir->aggregate($entries);
+
+        return $entries;
+    }
+
+    public function getEntry(LsRequest $req) {
+        $entry = $this->dir->create($req->realPath, dirname($req->path));
+        $entry = $this->dir->scrape([$entry])[0] ?? null;
+
+        return $entry;
+    }
+
+    public function handleException(Exception $ex) {
+        $isHttpException = $ex instanceof HttpException;
+        $code = $isHttpException? $ex->getCode() : 500;
+        $msg = $isHttpException? $ex->getMessage() : "Internal error";
+
+        if ($this->out) {
+            $this->out->writeException($ex);
+        } else {
+            echo s($ex->getMessage());
+        }
+
+        if ($code) {
+            http_response_code($code);
+        }
+
+        if ($ex instanceof RedirectException) {
+            header("Location: $msg");
+        }
+    }
+
+    public function init() {
+        error_reporting(PROJECT_DEBUG? E_ALL : 0);
+
+        $this->dir = new Entries;
+    }
+
+    public function run() {
+        $req = null;
+
+        try {
+            $req = new LsRequest(ROOT_REAL, ROOT_VIRTUAL);
+
+            switch ($req->outputFormat) {
+            case LsRequest::OUT_ATOM:
+                $this->out = new OutputAtom;
+                break;
+            case LsRequest::OUT_JSON:
+                $this->out = new OutputJson;
+                break;
+            case LsRequest::OUT_HTML:
+                $this->out = new OutputHtml;
+                break;
+            case LsRequest::OUT_TEXT:
+                $this->out = new LsOutput;
+                break;
+            default:
+                throw new HttpException("Unsupported", 415);
+                break;
+            }
+
+            $this->out->init();
+
+            $ctype = $this->out->getContentType();
+
+            if ($ctype) {
+                header("Content-Type: $ctype");
+            }
+        } catch (Exception $ex) {
+            $this->handleException($ex);
+            return;
+        }
+
+        $this->out->setTitle("ls $req->path");
+        $this->out->writeHeader();
+
+        try {
+            $req->assert();
+
+            if (is_dir($req->realPath)) {
+                $this->out->writeEntries($this->getEntries($req));
+            } else {
+                $this->out->dumpEntry($this->getEntry($req));
+            }
+        } catch (Exception $ex) {
+            $this->handleException($ex);
+        }
+
+        $this->out->writeFooter();
+        $this->out->flush();
+    }
+}
+
+$ls = new Main;
+
+$ls->init();
+
+$ls->run();
 
 // </MAIN>
 ?>
