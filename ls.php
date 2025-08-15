@@ -1519,6 +1519,97 @@ class OutputJson extends LsOutput {
     }
 }
 
+class OutputRss extends LsOutput {
+    public function dumpEntry($entry) {
+        $thumb = $ce->thumb ?? null;
+        $flattened = [];
+        $this->flattenVar($flattened, $entry);
+?>
+    <item>
+        <title><?=s($entry->name ?? "")?></title>
+        <pubDate><?=date(DATE_RSS, $entry->mtime ?? 0)?></pubDate>
+        <description>
+<?php
+        foreach ($flattened as $k => $v) {
+            echo s($k) . " = " . s($v) . "\n<br/>";
+        }
+?>
+        </description>
+    </item>
+<?php
+    }
+
+    public function getContentType() {
+        return "application/xml";
+    }
+
+    public function writeEntry($entry) {
+        $ce = self::condenseEntry($entry);
+        $desc = $entry->description ?? "";
+        $href = $entry->href;
+        $isExternalLink = $entry->type == Entries::LINKS_TYPE;
+        $size = prettySize($entry->size ?? null);
+        $mtime = $entry->mtime ?? time();
+        $id = sha1($entry->slug ?? null . $ce->name . PROJECT_URL . $size);
+?>
+    <item>
+        <title><?=s($ce->name)?></title>
+        <link><?=s($href)?></link>
+        <guid>urn:sha1:<?=s($id)?></guid>
+        <pubDate><?=date(DATE_RSS, $mtime)?></pubDate>
+        <description>
+            <?=htmlentities($desc, ENT_QUOTES | ENT_SUBSTITUTE | ENT_XML1)?>
+
+            <?=s($desc && ($ce->artist || $ce->album)? "-" : "")?>
+
+            <?=$ce->artist? ("by " . s($ce->artist)) : ""?>
+            <?=$ce->album? ("from " . s($ce->album)) : ""?>
+        </description>
+    </item>
+<?php
+    }
+
+    public function writeEntryGroupFooter(string $group) {
+?>
+    <!-- /<?=s($group)?> -->
+<?php
+    }
+
+    public function writeEntryGroupHeader(string $group) {
+?>
+    <!-- <?=s($group)?> -->
+<?php
+    }
+
+    public function writeException(Exception $ex) {
+?>
+        <pre class="http-error"><?=s($ex->getTraceAsString())?></pre>
+<?php
+    }
+
+    public function writeHeader() {
+        $updated = time();
+?>
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0">
+    <channel>
+        <title><?=s($this->title)?></title>
+        <description>Dir list</description>
+        <link><?=s(PROJECT_URL)?></link>
+        <pubDate><?=date(DATE_RSS, $updated)?></pubDate>
+        <generator><?=s(PROJECT_NAME)?></generator>
+<?php
+    }
+
+    public function writeFooter() {
+?>
+    </channel>
+</rss>
+<?php
+    }
+
+}
+
 // </UTILS>
 
 // <MAIN>
@@ -1590,6 +1681,9 @@ class Main {
                 break;
             case LsRequest::OUT_HTML:
                 $this->out = new OutputHtml;
+                break;
+            case LsRequest::OUT_RSS:
+                $this->out = new OutputRss;
                 break;
             case LsRequest::OUT_TEXT:
                 $this->out = new LsOutput;
