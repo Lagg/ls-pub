@@ -24,8 +24,6 @@ class LsRequest {
     public string $outputFormat = self::OUT_HTML;
     public bool $outputFormatSane = false;
 
-    private $linkEntries = null;
-
     public static $outputExts = [self::OUT_ATOM, self::OUT_HTML, self::OUT_JSON, self::OUT_RSS, self::OUT_TEXT];
 
     public function __construct($realRoot, $virtualRoot) {
@@ -41,13 +39,7 @@ class LsRequest {
         $realPathReadable = !$realPathMissing && is_readable($this->realPath);
 
         if ($realPathMissing) {
-            $entry = $this->getLinkEntries()[pnorm($this->basePath, null)] ?? null;
-
-            if ($entry) {
-                throw new RedirectException($entry->href);
-            } else {
-                throw new HttpException("Not found", 404);
-            }
+            throw new HttpException("Not found", 404);
         } else if (strpos($this->realPath, $this->realRoot) !== 0 || !$realPathReadable) {
             throw new HttpException("Forbidden", 403);
         } else if (!$this->outputFormatSane) {
@@ -55,51 +47,6 @@ class LsRequest {
         } else {
             return true;
         }
-    }
-
-    public function getLinkEntries() {
-        if ($this->linkEntries) {
-            return $this->linkEntries;
-        }
-
-        $entries = [];
-        $linksName = Config::get("links.name");
-        $realPath = (empty($this->realPath)? $this->realRoot : $this->realPath) . "/$linksName";
-
-        $stream = null;
-
-        if ($linksName && is_readable($realPath)) {
-            $stream = fopen($realPath, "r");
-        } else {
-            return $entries;
-        }
-
-        while (($line = fgetcsv($stream)) !== false) {
-            $line = array_map(function($field) {
-                return trim((string)$field);
-            }, $line);
-
-            $link = $line[0] ?? "";
-            $name = $line[1] ?? "";
-            $desc = $line[2] ?? "";
-            $slug = $line[3] ?? "l" . crc32($link);
-
-            if (!$link || $link[0] == '#') {
-                continue;
-            }
-
-            $entries[$slug] = (object)[
-                "type" => Entries::LINKS_TYPE,
-                "href" => $link,
-                "name" => $name,
-                "description" => explode(LsOutput::NEWLINE_TOKEN, $desc),
-                "slug" => $slug,
-            ];
-        }
-
-        fclose($stream);
-
-        return ($this->linkEntries = $entries);
     }
 
     public function resolve() {
@@ -181,20 +128,6 @@ class UrlScraper {
         curl_close($ctx);
 
         return $data;
-    }
-
-    public static function getRequestHeaders() {
-        $headers = [];
-
-        foreach ($_SERVER as $k => $v) {
-            if (strpos($k, "HTTP_") !== 0) {
-                continue;
-            }
-
-            $headers[$k] = $v;
-        }
-
-        return $headers;
     }
 }
 

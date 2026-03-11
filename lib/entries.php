@@ -1,100 +1,69 @@
 <?php namespace LsPub;
 
 class Entries {
-    const DEFAULT_TYPE = null;
-    const LINKS_TYPE = "url";
+    const DEFAULT_TYPE = 0;
+
+    const FILE_TYPE = 1;
+    const DIR_TYPE = 2;
+    const LINKS_TYPE = 3;
+
+    const AUDIO_STYPE = 4;
+    const IMAGE_STYPE = 5;
+    const VIDEO_STYPE = 6;
 
     const MAX_DESC_LEN = 140;
 
-    public static $extTypes = [
-        "audio" => ["mp3", "ogg", "flac"],
-        "image" => ["jpg", "png", "bmp"],
-        "video" => ["mp4", "ogv", "avi"]
+    public array $entries;
+
+    public static $stypeExts = [
+        self::AUDIO_STYPE => ["mp3", "ogg", "flac"],
+        self::IMAGE_STYPE => ["jpg", "png", "bmp"],
+        self::VIDEO_STYPE => ["mp4", "ogv", "avi"]
     ];
 
-    public static $extLabels = [
-        "audio" => "Music",
-        "image" => "Images",
-        "video" => "Videos",
+    public static $typeLabels = [
+        self::AUDIO_STYPE => "Music",
+        self::IMAGE_STYPE => "Images",
+        self::VIDEO_STYPE => "Videos",
         self::LINKS_TYPE => "Links",
-        self::DEFAULT_TYPE => "Misc"
+        self::FILE_TYPE => "Files",
+        self::DIR_TYPE => "Dirs"
     ];
 
-    public static $sortableFields = ["name", "type", "description", "size", "ctime", "atime", "mtime"];
+    public static $sortableFields = ["name", "type", "stype", "description", "size", "ctime", "atime", "mtime"];
 
-    // TODO: vroot shouldn't be needed
-
-    public function aggregate($entries) {
-        $aggregated = array_fill_keys(self::$extLabels, []);
+    public function __construct(array $entries) {
+        $this->entries = [];
+        $i = 0;
 
         foreach ($entries as $entry) {
-            $label = self::$extLabels[$entry->type] ?? self::$extLabels[self::DEFAULT_TYPE] ?? null;
+            $k = $entry->name;
 
-            if (!isset($aggregated[$label])) {
-                $aggregated[$label] = [];
+            if (isset($this->entries[$k])) {
+                $k .= '-' . ++$i;
             }
 
-            $aggregated[$label][] = $entry;
+            $this->entries[$k] = $entry;
         }
-
-        return $aggregated;
     }
 
-    public function create(string $realPath, string $virtualRoot) {
-        // Basic info/path building
-        $entry = (object)[
-            "name" => basename($realPath),
-            "canonical" => $realPath,
-            "description" => []
-        ];
+    public function aggregate() {
+        $aggregated = array_fill_keys(self::$typeLabels, []);
 
-        // Stat data
-        $stat = is_readable($entry->canonical)? stat($entry->canonical) : null;
-        foreach (["size", "atime", "ctime", "mtime"] as $k) {
-            $entry->{$k} = $stat[$k] ?? null;
-        }
+        foreach ($this->entries as $entry) {
+            $key = self::$typeLabels[$entry->stype] ?? self::$typeLabels[$entry->type] ?? "Misc";
 
-        // Basic typing to know when to header-scrape
-        $lastDot = strrpos($entry->name, ".");
-        $entry->ext = $lastDot? trim(strtolower(substr($entry->name, $lastDot + 1))) : null;
-        $entry->type = null;
-
-        foreach (self::$extTypes as $type => $exts) {
-            if (in_array($entry->ext, $exts)) {
-                $entry->type = $type;
-                break;
+            if (!isset($aggregated[$key])) {
+                $aggregated[$key] = [];
             }
+
+            $aggregated[$key][] = $entry;
         }
 
-        $entry->href = "$virtualRoot/$entry->name";
-
-        return $entry;
+        return array_filter($aggregated);
     }
 
-    public function get(string $realRoot, string $virtualRoot) {
-        $ls = [];
-
-        if (!$realRoot || !is_dir($realRoot)) {
-            return null;
-        }
-
-        $dir = opendir($realRoot);
-
-        if (!$dir) {
-            return null;
-        }
-
-        while (($name = readdir($dir)) !== false) {
-            $entry = $this->create("$realRoot/$name", $virtualRoot);
-            $ls[$entry->name] = $entry;
-        }
-
-        closedir($dir);
-
-        return $ls;
-    }
-
-    public function scrape($entries) {
+    public function scrape() {
         $metaCkey = "meta-file";
         $tubeCkey = "meta-tube";
 
@@ -107,8 +76,12 @@ class Entries {
         $cfresh = false;
         $fileMeta = Cache::get($metaCkey, []);
 
-        foreach ($entries as $entry) {
-            $n = $entry->canonical ?? $entry->name;
+        foreach ($this->entries as $entry) {
+            $n = $entry->canonical ?? null;
+
+            if (!$n) {
+                continue;
+            }
 
             if (empty($fileMeta[$n])) {
                 $fileMeta[$n] = ((new MetaScraper($entry))->scrape());
@@ -126,18 +99,18 @@ class Entries {
         }
 
         if ($tube) {
-            $tubeCkey .= "-" . sha1(implode(TubeScraper::getTubeIds($entries)));
+            $tubeCkey .= implode(TubeScraper::getTubeIds($this->entries));
             $tubeMeta = Cache::get($tubeCkey);
 
             if (is_null($tubeMeta)) {
-                $tubeMeta = $tube->scrapeVideoMeta($entries);
+                $tubeMeta = $tube->scrapeVideoMeta($this->entries);
 
                 if ($tubeMeta) {
                     Cache::set($tubeCkey, $tubeMeta, $cacheTubeTtl);
                 }
             }
 
-            foreach ($entries as $entry) {
+            foreach ($this->entries as $entry) {
                 $tubeId = TubeScraper::getTubeId($entry->href ?? null);
 
                 if (!$tubeId) {
@@ -154,44 +127,110 @@ class Entries {
                 $entry->meta = [
                     "channelId" => $snippet->channelId,
                     "channelName" => $snippet->channelTitle,
-                    "tags" => $snippet->tags
+                    "tags" => $snippet->tags ?? []
                 ];
 
                 $entry->ctime = strtotime($snippet->publishedAt);
+                $entry->mtime = $entry->ctime;
                 $entry->description = $snippet->description;
                 $entry->name = $snippet->title;
                 $entry->thumb = $snippet->thumbnails->default->url;
+                $entry->size = null;
 
                 $entry->description = self::getSaneDescription($entry);
             }
         }
-
-        return $entries;
     }
 
-    public function sort($entries, $opts=[]) {
-        $sortSet = isset($opts["by"]);
+    public function sort($opts=[]) {
         $sort = $opts["by"] ?? self::$sortableFields[0] ?? null;
-        $sortDir = $opts["dir"] ?? null;
+        $sortDesc = ($opts["dir"] ?? null) == "desc";
+        $sortSet = isset($opts["by"]);
 
-        usort($entries, function($a, $b) use ($sort, $sortDir, $sortSet) {
-            if (!$sortSet && ($a->type == self::LINKS_TYPE || $b->type == self::LINKS_TYPE)) {
-                return 0;
+        if (!in_array($sort, self::$sortableFields)) {
+            $sort = null;
+        }
+
+        usort($this->entries, function($a, $b) use ($sort, $sortDesc, $sortSet) {
+            $a = (!$sortSet && $a->type == self::LINKS_TYPE)? 0 : ($a->{$sort} ?? null);
+            $b = (!$sortSet && $b->type == self::LINKS_TYPE)? 0 : ($b->{$sort} ?? null);
+
+            if ($sort == "type" || $sort == "stype") {
+                $a = self::$typeLabels[$a] ?? $a;
+                $b = self::$typeLabels[$b] ?? $b;
             }
 
-            $sort = in_array($sort, self::$sortableFields)? $sort : null;
-            $desc = $sortDir == "desc";
-            $a = $a->{$sort} ?? null;
-            $b = $b->{$sort} ?? null;
-
             if ($a < $b) {
-                return !$desc? -1 : 1;
+                return !$sortDesc? -1 : 1;
             } else if ($a > $b) {
-                return !$desc? 1 : -1;
+                return !$sortDesc? 1 : -1;
             } else {
                 return 0;
             }
         });
+    }
+
+    public static function fromDir(string $realPath) {
+        if (!$realPath || !is_readable($realPath)) {
+            throw new LsPubException("Invalid realpath");
+        } else if (!is_dir($realPath)) {
+            return [self::newEntry(["canonical" => $realPath])];
+        }
+
+        $dir = opendir($realPath);
+
+        if (!$dir) {
+            return null;
+        }
+
+        $linksName = Config::get("links.name");
+        $ls = [];
+
+        while (($name = readdir($dir)) !== false) {
+            $entry = self::newEntry(["canonical" => "$realPath/$name"]);
+            $ls[] = $entry;
+
+            if ($entry->name == $linksName) {
+                $ls = array_merge($ls, self::fromLinks($entry->canonical));
+            }
+        }
+
+        closedir($dir);
+
+        return $ls;
+    }
+
+    public static function fromLinks(string $realPath) {
+        if (!$realPath || !is_readable($realPath)) {
+            throw new LsPubException("Invalid realpath");
+        }
+
+        $entries = [];
+        $stream = fopen($realPath, "r");
+
+        while (($line = fgetcsv($stream, null, ",", "\"", "\\")) !== false) {
+            $line = array_map(function($field) {
+                return trim((string)$field);
+            }, $line);
+
+            $link = $line[0] ?? "";
+            $name = $line[1] ?? "";
+            $desc = $line[2] ?? "";
+
+            if (!$link || $link[0] == '#') {
+                continue;
+            }
+
+            $entries[] = self::newEntry([
+                "canonical" => $realPath,
+                "type" => self::LINKS_TYPE,
+                "href" => $link,
+                "name" => $name,
+                "description" => explode(LsOutput::NEWLINE_TOKEN, $desc)
+            ]);
+        }
+
+        fclose($stream);
 
         return $entries;
     }
@@ -211,8 +250,8 @@ class Entries {
         $saneDesc = [];
 
         foreach (explode("\n", $desc) as $line) {
-            $fc = $line[0] ?? '';
-            $fco = ord($fc);
+            $fc = $line[0] ?? null;
+            $fco = $fc? ord($fc) : 0;
 
             // Skip lines with
             if (
@@ -253,6 +292,60 @@ class Entries {
         }
 
         return array_filter($saneDesc);
+    }
+
+    public static function newEntry(array $fields=[]) {
+        $entry = (object)array_merge([
+            "name" => null,
+            "type" => null,
+            "stype" => null,
+            "description" => [],
+            "canonical" => null,
+            "href" => null
+        ], $fields);
+
+        // Sane defaults
+        if (!$entry->name) {
+            $entry->name = $entry->canonical? basename($entry->canonical) : mt_rand();
+        }
+
+        if (!$entry->type) {
+            $entry->type = self::DEFAULT_TYPE;
+        }
+
+        if (!$entry->stype) {
+            $entry->stype = self::DEFAULT_TYPE;
+        }
+
+        // File meta
+        if ($entry->canonical) {
+            $stat = is_readable($entry->canonical)? stat($entry->canonical) : null;
+
+            foreach (["size", "atime", "ctime", "mtime"] as $k) {
+                $entry->{$k} = $stat[$k] ?? null;
+            }
+
+            if ($stat && !$entry->type) {
+                $entry->type = self::FILE_TYPE;
+
+                if (is_dir($entry->canonical)) {
+                    $entry->type = self::DIR_TYPE;
+                }
+            }
+
+            // Basic typing to know when to header-scrape
+            $lastDot = strrpos($entry->canonical, ".");
+            $entry->ext = $lastDot? trim(strtolower(substr($entry->canonical, $lastDot + 1))) : null;
+
+            foreach (self::$stypeExts as $type => $exts) {
+                if (in_array($entry->ext, $exts)) {
+                    $entry->stype = $type;
+                    break;
+                }
+            }
+        }
+
+        return $entry;
     }
 }
 

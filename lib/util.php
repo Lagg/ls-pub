@@ -40,7 +40,9 @@ function varDump($var) {
     }
 
     if (is_array($var)) {
-        return array_map('varDump', $var);
+        return array_map(function($v) {
+            return varDump($v);
+        }, $var);
     }
 
     if (is_scalar($var) && !is_string($var)) {

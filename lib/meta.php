@@ -88,14 +88,12 @@ class MetaScraper {
         }
 
         // Attempt utf normalization if needed specifically *after* unpack due to null sep
-        $frame->data = self::decodeId3Text(self::unpackId3Payload($this->readChunk($frame->size)));
+        $frame->data = self::unpackId3Payload($this->readChunk($frame->size));
 
         // Per spec saying it's always a "desc string" followed by null followed by real string
         if ($frame->id == self::ID3_TEXT_TAG) {
-            $frame->data = self::unpackId3TextFrame($frame->data);
-        }
-
-        if ($frame->id == self::ID3_APIC_TAG) {
+            $frame->data = self::unpackId3TextFrame($frame->data, true);
+        } else if ($frame->id == self::ID3_APIC_TAG) {
             $frame->data = self::unpackId3ApicFrame($frame->data);
 
             if ($detachApics) {
@@ -103,6 +101,8 @@ class MetaScraper {
                 File::set($apicName, $frame->data->data);
                 $frame->data->data = $apicName;
             }
+        } else {
+            $frame->data = self::decodeId3Text($frame->data);
         }
 
         return $frame;
@@ -281,8 +281,9 @@ class MetaScraper {
         return $data;
     }
 
-    public static function unpackId3TextFrame(string $data) {
-        return array_map('LsPub\MetaScraper::decodeId3Text', explode("\x00", $data, 2));
+    public static function unpackId3TextFrame(string $data, bool $decode=false) {
+        $data = explode("\x00", $data, 2);
+        return $decode? array_map('LsPub\MetaScraper::decodeId3Text', $data) : $data;
     }
 
     public static function unpackOggComment(string $data) {
@@ -354,7 +355,13 @@ class TubeScraper {
         return $items;
     }
 
-    public static function getTubeId(string $href) {
+    public static function getTubeId($href) {
+        $href = (string)$href;
+
+        if (empty($href)) {
+            return null;
+        }
+
         $url = parse_url($href);
         $host = $url["host"] ?? "";
         $query = [];
@@ -373,18 +380,25 @@ class TubeScraper {
     }
 
     public static function getTubeIds($entriesOrLinks) {
+        $ids = [];
+
         if (!is_array($entriesOrLinks)) {
             $entriesOrLinks = [$entriesOrLinks];
         }
 
-        $entriesOrLinks = array_filter(array_map(function($link) {
-            $link = is_string($link)? $link : ($link->href ?? null);
-            return self::getTubeId($link);
-        }, $entriesOrLinks));
+        foreach ($entriesOrLinks as $entry) {
+            $href = is_string($entry)? $entry : ($entry->href ?? null);
 
-        sort($entriesOrLinks);
+            if (!$href) {
+                continue;
+            } else {
+                $ids[] = self::getTubeId($href);
+            }
+        }
 
-        return $entriesOrLinks;
+        sort ($ids);
+
+        return $ids;
     }
 }
 

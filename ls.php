@@ -4,29 +4,23 @@ require_once("lib/main.php");
 // <MAIN>
 
 class Main {
-    private ?LsPub\Entries $dir = null;
     private ?LsPub\LsOutput $out = null;
 
     public function getEntries(LsPub\LsRequest $req) {
-        $entries = array_merge($req->getLinkEntries(), $this->dir->get($req->realPath, $req->path));
+        $entries = new LsPub\Entries(LsPub\Entries::fromDir($req->realPath));
 
-        $entries = $this->dir->scrape($entries);
+        $entries->scrape();
 
-        $entries = $this->dir->sort($entries, [
+        $entries->sort([
             "by" => $req->query["sort"] ?? null,
             "dir" => $req->query["dir"] ?? null
         ]);
 
-        $entries = $this->dir->aggregate($entries);
+        foreach ($entries->entries as $entry) {
+            $entry->href = $entry->href ?? "$req->path/$entry->name";
+        }
 
-        return $entries;
-    }
-
-    public function getEntry(LsPub\LsRequest $req) {
-        $entry = $this->dir->create($req->realPath, dirname($req->path));
-        $entry = $this->dir->scrape([$entry])[0] ?? null;
-
-        return $entry;
+        return $entries->aggregate();
     }
 
     public function handleException(Exception $ex) {
@@ -53,8 +47,6 @@ class Main {
         $debug = LsPub\Config::get("project.debug");
 
         error_reporting($debug? E_ALL : 0);
-
-        $this->dir = new LsPub\Entries;
     }
 
     public function run() {
@@ -104,10 +96,12 @@ class Main {
         try {
             $req->assert();
 
+            $entries = $this->getEntries($req);
+
             if (is_dir($req->realPath)) {
-                $this->out->writeEntries($this->getEntries($req));
+                $this->out->writeEntries($entries);
             } else {
-                $this->out->dumpEntry($this->getEntry($req));
+                $this->out->dumpEntry(array_values($entries)[0]);
             }
         } catch (Exception $ex) {
             $this->handleException($ex);

@@ -80,7 +80,7 @@ class LsOutput {
             $desc .= " from $c->album";
         }
 
-        $this->lines[] = [$entry->type, $entry->href, $name, $desc, $thumb];
+        $this->lines[] = [$entry->type, $entry->stype, $entry->href, $name, $desc, $thumb];
     }
 
     public function writeEntryGroup(string $group, array $data) {
@@ -294,7 +294,6 @@ class OutputHtml extends LsOutput {
         $href = $entry->href;
         $id = $entry->slug ?? null;
         $isExternalLink = $entry->type == Entries::LINKS_TYPE;
-        $size = prettySize($entry->size ?? null)
 ?>
     <tr<?=$id? (' id="' . s($id) . '"') : ''?>>
         <th class="thumb">
@@ -319,8 +318,19 @@ class OutputHtml extends LsOutput {
             <?=$ce->artist? ("by <em>" . s($ce->artist) . "</em>") : ""?>
             <?=$ce->album? ("from <em>" . s($ce->album) . "</em>") : ""?>
         </td>
+<?php
+        if (!empty($ce->mtime)) {
+?>
         <td class="mtime"><?=s($ce->mtime)?></td>
-        <td class="size"><?=s($size)?></td>
+<?php
+        }
+
+        if (!$isExternalLink && !empty($entry->size)) {
+?>
+        <td class="size"><?=s(prettySize($entry->size))?></td>
+<?php
+        }
+?>
     </tr>
 <?php
     }

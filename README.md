@@ -4,7 +4,7 @@ Directory and file metadata lister/scraper tool in PHP.
 
 # Configuration
 
-Config of the script itself is done by editing the vars at the top.
+Config is done by editing `config.php`
 
 Example server config:
 
