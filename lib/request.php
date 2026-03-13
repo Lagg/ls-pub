@@ -109,7 +109,7 @@ class UrlScraper {
 
     public function __construct() {
         $name = Config::get("project.name");
-        $userAgent = "$name URL Scraper";
+        $userAgent = "$name Metadata Scraper";
 
         $this->httpHeaders = [
             "User-Agent: $userAgent"

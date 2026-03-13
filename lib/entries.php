@@ -171,8 +171,10 @@ class Entries {
     }
 
     public static function fromDir(string $realPath) {
-        if (!$realPath || !is_readable($realPath)) {
+        if (!$realPath) {
             throw new LsPubException("Invalid realpath");
+        } else if (!is_readable($realPath)) {
+            throw new LsPubException("Unreadable realpath $realPath");
         } else if (!is_dir($realPath)) {
             return [self::newEntry(["canonical" => $realPath])];
         }
@@ -187,6 +189,10 @@ class Entries {
         $ls = [];
 
         while (($name = readdir($dir)) !== false) {
+            if ($name == "." || $name == "..") {
+                continue;
+            }
+
             $entry = self::newEntry(["canonical" => "$realPath/$name"]);
             $ls[] = $entry;
 
@@ -295,6 +301,8 @@ class Entries {
     }
 
     public static function newEntry(array $fields=[]) {
+        $realRoot = \LsPub\Config::get("root.real");
+
         $entry = (object)array_merge([
             "name" => null,
             "type" => null,
@@ -317,8 +325,16 @@ class Entries {
             $entry->stype = self::DEFAULT_TYPE;
         }
 
-        // File meta
+        // Metadata
         if ($entry->canonical) {
+            $entry->canonical = realpath($entry->canonical);
+
+            if (!$entry->canonical) {
+                throw new LsPubException("Invalid path $entry->name");
+            } else if (strncmp($realRoot, $entry->canonical, strlen($realRoot))) {
+                throw new LsPubException("$entry->name outside real root");
+            }
+
             $stat = is_readable($entry->canonical)? stat($entry->canonical) : null;
 
             foreach (["size", "atime", "ctime", "mtime"] as $k) {

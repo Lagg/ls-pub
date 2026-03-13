@@ -8,15 +8,18 @@ class LsOutput {
 
     public static $censoredDumpKeys = ["[canonical]"];
 
+    protected LsRequest $request;
+
     protected $stdout;
     protected string $title = "";
 
     private $lines = [];
 
-    public function __construct() {
+    public function __construct(LsRequest $request) {
         $vroot = (string)(Config::get("root.virtual") ?? "/");
         $this->projectName = (string)Config::get("project.name");
         $this->projectUrl = Config::get("project.url") . $vroot;
+        $this->request = $request;
     }
 
     public function dumpEntry($entry) {
@@ -289,6 +292,11 @@ class OutputHtml extends LsOutput {
         return null;
     }
 
+    public function writeEntries($entries) {
+        $this->writeNav();
+        parent::writeEntries($entries);
+    }
+
     public function writeEntry($entry) {
         $ce = self::condenseEntry($entry);
         $href = $entry->href;
@@ -347,7 +355,7 @@ class OutputHtml extends LsOutput {
         $saneGroupHref = strtolower($saneGroup);
 ?>
         <table class="entries">
-            <caption id="<?=$saneGroupHref?>"><a href="#<?=$saneGroupHref?>">#</a><?=$saneGroup?></caption>
+            <caption id="<?=$saneGroupHref?>"><a href="#<?=$saneGroupHref?>">#<?=$saneGroup?></a></caption>
             <tbody>
 <?php
     }
@@ -369,15 +377,20 @@ class OutputHtml extends LsOutput {
         <style>
             .entries {
                 border-collapse: collapse;
-                margin: 2em 1em;
+                margin: 1em;
                 text-align: left;
             }
 
             .entries caption {
                 font-weight: bold;
+                font-size: 1.5em;
                 text-align: left;
                 margin-left: 1em;
                 margin-bottom: .35em;
+            }
+
+            .entries caption, .entries caption a {
+                color: #00fc90;
             }
 
             .entries tr td, .entries tr th {
@@ -408,6 +421,12 @@ class OutputHtml extends LsOutput {
             .entries .thumb img {
                 width: 64px;
             }
+
+            nav {
+                margin: .5em;
+                text-align: left;
+                padding: .5em;
+            }
         </style>
     </head>
     <body>
@@ -418,6 +437,26 @@ class OutputHtml extends LsOutput {
 ?>
     </body>
 </html>
+<?php
+    }
+
+    private function writeNav() {
+        $navPath = [];
+        $projName = Config::get("project.name", "");
+        $projUrl = Config::get("project.url", "/");
+
+?>
+    <nav>
+        <a href="<?=s($projUrl)?>">ls</a>
+<?php
+        foreach (psplit($this->request->path) as $dir) {
+            $navPath[] = $dir;
+?>
+            / <a href="/<?=s(implode('/', $navPath))?>"><?=s($dir)?></a>
+<?php
+        }
+?>
+        </nav>
 <?php
     }
 }

@@ -28,6 +28,10 @@ function pnorm($path, $root='/') {
     return $root . trim($path, '/');
 }
 
+function psplit($path, $root='/', $tok='/') {
+    return array_filter(explode($tok, pnorm($path, $root)));
+}
+
 function s(...$args) {
     return htmlentities(implode(" ", $args));
 }

@@ -59,19 +59,19 @@ class Main {
 
             switch ($req->outputFormat) {
             case LsPub\LsRequest::OUT_ATOM:
-                $this->out = new LsPub\OutputAtom;
+                $this->out = new LsPub\OutputAtom($req);
                 break;
             case LsPub\LsRequest::OUT_JSON:
-                $this->out = new LsPub\OutputJson;
+                $this->out = new LsPub\OutputJson($req);
                 break;
             case LsPub\LsRequest::OUT_HTML:
-                $this->out = new LsPub\OutputHtml;
+                $this->out = new LsPub\OutputHtml($req);
                 break;
             case LsPub\LsRequest::OUT_RSS:
-                $this->out = new LsPub\OutputRss;
+                $this->out = new LsPub\OutputRss($req);
                 break;
             case LsPub\LsRequest::OUT_TEXT:
-                $this->out = new LsPub\LsOutput;
+                $this->out = new LsPub\LsOutput($req);
                 break;
             default:
                 throw new LsPub\HttpException("Unsupported", 415);
