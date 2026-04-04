@@ -15,13 +15,20 @@
     // If null, / assumed
     'root.virtual' => null,
 
+    // If false, a background cron job/loop of the `scrape` tool is assumed
+    'scrape.inline' => true,
+    // Inline (page-based) scrapes will time out after this many Msecs
+    'scrape.inline.timeout' => 800,
+
     // File where link list is stored
     'links.name' => 'links.txt',
 
     // Tube scraper conf
     'tube.key' => null,
 
-    // Cache TTLs
+    // Cache TTLs (Secs)
     'cache.ttl.meta' => 300,
     'cache.ttl.tube' => 600,
+    'cache.ttl.page' => 3600,
+    'cache.ttl.feed' => 1800
 ]; ?>

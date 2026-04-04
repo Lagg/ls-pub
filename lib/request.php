@@ -104,31 +104,4 @@ class LsRequest {
     }
 }
 
-class UrlScraper {
-    private array $httpHeaders;
-
-    public function __construct() {
-        $name = Config::get("project.name");
-        $userAgent = "$name Metadata Scraper";
-
-        $this->httpHeaders = [
-            "User-Agent: $userAgent"
-        ];
-    }
-
-    public function get(string $url) {
-        $ctx = curl_init();
-
-        curl_setopt($ctx, CURLOPT_RETURNTRANSFER, true);
-        curl_setopt($ctx, CURLOPT_URL, $url);
-        curl_setopt($ctx, CURLOPT_HTTPHEADER, $this->httpHeaders);
-
-        $data = curl_exec($ctx);
-
-        curl_close($ctx);
-
-        return $data;
-    }
-}
-
 ?>

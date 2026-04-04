@@ -1,5 +1,104 @@
 <?php namespace LsPub;
 
+class Url {
+    const CONNECT_TIMEOUT = 2;
+    const TIMEOUT = 4;
+
+    public $url;
+    public $urlInfo;
+    public $urlHeaders;
+
+    public array $curlOpts;
+
+    public function __construct(string $url) {
+        $name = Config::get("project.name");
+        $httpHeaders = ["User-Agent: $name Lore Scraper"];
+
+        $this->url = $url;
+
+        $this->curlOpts = [
+            CURLOPT_CONNECTTIMEOUT => self::CONNECT_TIMEOUT,
+            CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_HTTPHEADER => $httpHeaders,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT => self::TIMEOUT,
+            CURLOPT_HEADERFUNCTION => [$this, "writeUrlHeaders"]
+        ];
+    }
+
+    public function get($opts=null) {
+        return $this->execHandle($opts);
+    }
+
+    public function head($opts=null) {
+        $headers = [];
+        $opts = (array)($opts ?? null);
+        $opts[CURLOPT_HEADER] = true;
+        $opts[CURLOPT_NOBODY] = true;
+
+        return self::parseHttpHeaders($this->execHandle($opts));
+    }
+
+    public static function parseHttpHeaders($data) {
+        foreach (explode("\n", $data) as $header) {
+            $pair = explode(':', $header, 2);
+
+            if (count($pair) != 2) {
+                continue;
+            }
+
+            $k = strtolower($pair[0]);
+            $v = $pair[1];
+
+            if ($k == "content-length") {
+                $v = (int)$v;
+            }
+
+            $headers[$k] = $v;
+        }
+
+        return $headers;
+
+    }
+
+    private function execHandle($opts=null) {
+        $opts = $this->getOpts($opts);
+        $opts[CURLOPT_URL] = $this->url;
+
+        $ctx = curl_init();
+
+        curl_setopt_array($ctx, $opts);
+
+        $this->urlHeaders = "";
+
+        $data = curl_exec($ctx);
+
+        $this->urlInfo = curl_getinfo($ctx);
+
+        if (PHP_MAJOR_VERSION < 8) {
+            curl_close($ctx);
+        }
+
+        return $data;
+    }
+
+    private function getOpts($opts) {
+        $mOpts = $this->curlOpts + [];
+
+        foreach ($opts ?? [] as $k => $v) {
+            $mOpts[$k] = $v;
+        }
+
+        return $mOpts;
+    }
+
+    private function writeUrlHeaders($ctx, $data) {
+        $this->urlHeaders .= $data;
+
+        return strlen($data);
+    }
+}
+
 function prettyDate($ts) {
     return $ts? date("Y-m-d H:i:s T", $ts) : null;
 }

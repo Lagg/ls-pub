@@ -133,7 +133,7 @@ class LsOutput {
 
         // Expanded metadata
         $name = $m["TIT2"] ?? $m["TITLE"] ?? $name;
-        $artist = $m["ARTISTSORT"] ?? $m["ALBUMARTISTSORT"] ?? $m["ARTISTS"] ?? $m["TPE1"] ?? $artist;
+        $artist = $m["ARTIST"] ?? $m["ARTISTS"] ?? $m["ARTISTSORT"] ?? $m["ALBUMARTISTSORT"] ?? $m["TPE1"] ?? $artist;
         $album = $m["TALB"] ?? $m["ALBUM"] ?? $album;
         $mtime = $m["ORIGINALDATE"] ?? $m["TYER"] ?? $m["originalyear"] ?? $mtime;
         $thumb = $apicHref? "$thumbRoot/data/$apicHref" : $thumb;

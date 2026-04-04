@@ -20,7 +20,7 @@ class MetaScraper {
 
     const CHUNK_SIZE = 512;
 
-    private $entry;
+    private $filename;
     private $stream;
 
     private $chunk;
@@ -31,8 +31,8 @@ class MetaScraper {
         "image/png" => "png"
     ];
 
-    public function __construct($entry) {
-        $this->entry = $entry;
+    public function __construct($filename) {
+        $this->filename = $filename;
     }
 
     public function closeFile() {
@@ -51,12 +51,11 @@ class MetaScraper {
     }
 
     public function isScrapable() {
-        $canonPath = $this->entry->canonical ?? null;
-        return !empty($canonPath) && is_file($canonPath) && is_readable($canonPath);
+        return !empty($this->filename) && is_file($this->filename) && is_readable($this->filename);
     }
 
     public function openFile() {
-        $this->stream = fopen($this->entry->canonical, "r");
+        $this->stream = fopen($this->filename, "r");
         $this->chunk = null;
     }
 
@@ -323,6 +322,162 @@ class MetaScraper {
     }
 }
 
+class PageScraper {
+    public $page;
+    public $url;
+
+    public function __construct($pageUrl=null) {
+        $this->url = $pageUrl instanceof Url? $pageUrl : new Url(trim($pageUrl, '/'));
+    }
+
+    public function getHrefPermalink(string $href) {
+        $urlAbs = $this->url->url;
+        $href = trim($href, '/');
+        $urlPath = parse_url($urlAbs, PHP_URL_PATH);
+        $urlPathPos = strpos($urlAbs, $urlPath);
+        $hostPart = trim(($urlPath && $urlPathPos)? substr($urlAbs, $urlPathPos) : $urlAbs);
+        $phref = (object)parse_url($href);
+
+        if (empty($phref->scheme) || empty($phref->host)) {
+            return "$hostPart/$href";
+        } else {
+            return $href;
+        }
+    }
+
+    public function scrape() {
+        $dom = new \DOMDocument;
+        $page = $this->getPage();
+        $out = [];
+
+        if (preg_match('/^ *< *! *doctype *html/i', $page)) {
+            $dom->loadHTML($page);
+            $out = $this->scrapeHtmlRoot($dom);
+        } else if (preg_match('/^ *< *\? *xml/i', $page)) {
+            $dom->loadXML($page);
+            $out = $this->scrapeFeedRoot($dom);
+        } else {
+            throw new LsPubException("Unscrapable page");
+        }
+
+        $out["name"] = $out["name"] ?? null;
+        $out["links"] = $out["links"] ?? null;
+        $out["entries"] = $out["entries"] ?? null;
+        $out["href"] = $this->url->urlInfo["url"];
+        $out["root"] = $dom->documentElement->tagName;
+        $out["syndication"] = $out["syndication"] ?? null;
+
+        return (object)$out;
+    }
+
+    private function getPage() {
+        if (!$this->page && $this->url) {
+            $this->page = $this->url->get();
+        } else if (!$this->page && !$this->url) {
+            throw new LsPubException("Need either URL or page data to scrape");
+        }
+
+        return $this->page;
+    }
+
+    private function scrapeAtomEntries($dom) {
+        $entries = [];
+
+        foreach ($dom->getElementsByTagName("entry") as $entry) {
+            $title = $entry->getElementsByTagName("title")[0]->textContent ?? null;
+            $href = $entry->getElementsByTagName("link")[0] ?? null;
+            $href = $href? $href->getAttribute("href") : null;
+            $id = $entry->getElementsByTagName("id")[0]->textContent ?? null;
+            $updatedAt = $entry->getElementsByTagName("updated")[0]->textContent ?? null;
+            $summary = ($entry->getElementsByTagName("summary")[0] ?? $entry->getElementsByTagName("content")[0])->nodeValue ?? null;
+
+            $updatedAt = $updatedAt? \DateTime::createFromFormat(\DateTime::ATOM, $updatedAt) : $updatedAt;
+
+            $entries[] = [
+                "name" => $title,
+                "href" => $this->getHrefPermalink($href),
+                "id" => $id,
+                "mtime" => $updatedAt? $updatedAt->getTimestamp() : null,
+                "description" => $summary
+            ];
+        }
+
+        return $entries;
+    }
+
+    private function scrapeFeedRoot($dom) {
+        $title = $dom->getElementsByTagName("title")[0]->textContent ?? null;
+        $entries = [];
+
+        switch ($dom->documentElement->nodeName) {
+        case "feed":
+            $entries = $this->scrapeAtomEntries($dom);
+            break;
+        case "rss":
+            $entries = $this->scrapeRssEntries($dom);
+            break;
+        }
+
+        return [
+            "name" => $title,
+            "entries" => $entries
+        ];
+    }
+
+    private function scrapeHtmlRoot($dom) {
+        $links = [];
+        $head = $dom->getElementsByTagName("head")[0] ?? null;
+        $title = $head? ($head->getElementsByTagName("title")[0]->textContent ?? null) : null;
+        $syndication = null;
+
+        foreach ($head? $head->getElementsByTagName("link") : [] as $link) {
+            $href = $link->getAttribute("href");
+            $rel = $link->getAttribute("rel");
+            $type = $link->getAttribute("type");
+
+            $link = [$this->getHrefPermalink($href), $rel, $type];
+
+            if (!$syndication && $rel == "alternate" && substr($type, -3) == "xml") {
+                $syndication = $link;
+            }
+
+            $links[] = $link;
+        }
+
+        $entry = [
+            "name" => $title,
+            "links" => $links,
+            "syndication" => $syndication
+        ];
+
+        return $entry;
+    }
+
+    private function scrapeRssEntries($dom) {
+        $entries = [];
+
+        foreach ($dom->getElementsByTagName("item") as $entry) {
+            $title = $entry->getElementsByTagName("title")[0]->textContent ?? null;
+            $href = $entry->getElementsByTagName("link")[0]->textContent ?? null;
+            $id = $entry->getElementsByTagName("guid")[0]->textContent ?? null;
+            $updatedAt = $entry->getElementsByTagName("pubDate")[0]->textContent ?? null;
+            $description = $entry->getElementsByTagName("description")[0]->nodeValue ?? null;
+
+            $updatedAt = $updatedAt? \DateTime::createFromFormat(\DateTime::RSS, $updatedAt) : $updatedAt;
+
+            $entries[] = [
+                "name" => $title,
+                "href" => $href,
+                "id" => $id,
+                "mtime" => $updatedAt? $updatedAt->getTimestamp() : null,
+                "description" => $description
+            ];
+        }
+
+        return $entries;
+    }
+}
+
 class TubeScraper {
     const VIDEO_LIST_QUERY = "?part=id,snippet";
     const VIDEO_LIST_URL = "https://www.googleapis.com/youtube/v3/videos";
@@ -333,20 +488,12 @@ class TubeScraper {
         $this->apiKey = $apiKey;
     }
 
-    public function scrapeVideoMeta($entriesOrLinks) {
-        $items = [];
+    public function scrapeVideos($videoIds) {
+        $videoIds = implode(",", $videoIds);
+        $requestUrl = self::VIDEO_LIST_URL . self::VIDEO_LIST_QUERY . "&id=$videoIds&key=$this->apiKey";
+        $url = new Url($requestUrl);
 
-        $entriesOrLinks = self::getTubeIds($entriesOrLinks);
-
-        if (empty($entriesOrLinks)) {
-            return $items;
-        }
-
-        $idChunk = implode(",", $entriesOrLinks);
-        $urlScraper = new UrlScraper();
-        $requestUrl = self::VIDEO_LIST_URL . self::VIDEO_LIST_QUERY . "&id=$idChunk&key=$this->apiKey";
-
-        $meta = json_decode($urlScraper->get($requestUrl));
+        $meta = json_decode($url->get());
 
         foreach ($meta->items ?? [] as $item) {
             $items[$item->id] = $item;

@@ -7,9 +7,11 @@ class Main {
     private ?LsPub\LsOutput $out = null;
 
     public function getEntries(LsPub\LsRequest $req) {
-        $entries = new LsPub\Entries(LsPub\Entries::fromDir($req->realPath));
+        $scrapeEnabled = LsPub\Config::get("scrape.inline");
+        $scrapeTimeout = LsPub\Config::get("scrape.inline.timeout");
 
-        $entries->scrape();
+        $entries = new LsPub\Entries(LsPub\Entries::fromDir($req->realPath));
+        $entries->loadMeta($scrapeEnabled, $scrapeTimeout);
 
         $entries->sort([
             "by" => $req->query["sort"] ?? null,
@@ -99,9 +101,9 @@ class Main {
             $entries = $this->getEntries($req);
 
             if (is_dir($req->realPath)) {
-                $this->out->writeEntries($entries);
+                $this->out->writeEntries($entries->aggregate());
             } else {
-                $this->out->dumpEntry(array_values($entries)[0]);
+                $this->out->dumpEntry($entries->entries[0]);
             }
         } catch (Exception $ex) {
             $this->handleException($ex);

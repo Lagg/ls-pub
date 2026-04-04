@@ -32,6 +32,9 @@ class Entries {
 
     public static $sortableFields = ["name", "type", "stype", "description", "size", "ctime", "atime", "mtime"];
 
+    private $scrapeStartedAt = null;
+    private $scrapeTimeout = null;
+
     public function __construct(array $entries) {
         $this->entries = [];
         $i = 0;
@@ -63,83 +66,132 @@ class Entries {
         return array_filter($aggregated);
     }
 
-    public function scrape() {
-        $metaCkey = "meta-file";
-        $tubeCkey = "meta-tube";
+    public function loadMeta($fresh=true, $timeout=0) {
+        if ($timeout > 0) {
+            $this->setScrapeTimer($timeout);
+        }
 
-        $apiKey = Config::get("tube.key");
-        $cacheMetaTtl = Config::get("cache.ttl.meta");
-        $cacheTubeTtl = Config::get("cache.ttl.tube");
+        // Build scrape-type-separated lists that I still feel like
+        // are a big exercise in trusting zend to not make copies randomly
 
-        $tube = $apiKey? new TubeScraper($apiKey) : null;
-
-        $cfresh = false;
-        $fileMeta = Cache::get($metaCkey, []);
+        $fileTodo = [];
+        $urlTodo = [];
+        $tubeTodo = [];
 
         foreach ($this->entries as $entry) {
-            $n = $entry->canonical ?? null;
+            $url = $entry->href ?? null;
+            $tubeId = TubeScraper::getTubeId($url);
+            $filename = $entry->canonical ?? null;
 
-            if (!$n) {
+            if ($filename) {
+                $fileTodo[$filename] = $entry;
+            }
+
+            if ($tubeId) {
+                $tubeTodo[$tubeId] = $entry;
+            } else if ($url) {
+                $urlTodo[$url] = $entry;
+            }
+        }
+
+        // Grab tube vid IDs before shuffle loses them
+        $tubeIds = array_keys($tubeTodo);
+        sort($tubeIds);
+
+        // Slight bit of randomness to help inline timed scrapes complete
+        shuffle($fileTodo);
+        shuffle($tubeTodo);
+        shuffle($urlTodo);
+
+        // File metadata get/set
+        $metaCacheTtl = Config::get("cache.ttl.meta");
+
+        foreach($fileTodo as $entry) {
+            $filename = $entry->canonical;
+            $ckey = "meta-file-" . crc32($filename);
+            $meta = Cache::get($ckey);
+
+            if (!$meta && $fresh) {
+                $meta = (new MetaScraper($filename))->scrape();
+                Cache::set($ckey, $meta, $metaCacheTtl);
+            }
+
+            $entry->header = $meta->header ?? null;
+            $entry->meta = $meta->data ?? null;
+
+            if ($this->getScrapeTimeRemaining() <= 0) {
+                break;
+            }
+        }
+
+        if ($this->getScrapeTimeRemaining() <= 0) {
+            return;
+        }
+
+        // URL/page metadata get/set
+        $urlCacheTtl = Config::get("cache.ttl.page");
+
+        foreach ($urlTodo as $entry) {
+            $url = $entry->href;
+            $ckey = "meta-url-" . crc32($url);
+            $meta = Cache::get($ckey);
+
+            if (!$meta && $fresh) {
+                $meta = (new PageScraper($url))->scrape();
+                Cache::set($ckey, $meta, $urlCacheTtl);
+            }
+
+            if ($this->getScrapeTimeRemaining() <= 0) {
+                break;
+            }
+        }
+
+        if ($this->getScrapeTimeRemaining() <= 0) {
+            return;
+        }
+
+        // Tube vid metadata get/set
+        $tubeCkey = "meta-tube-" . crc32(implode("", $tubeIds));
+        $tubeApiKey = Config::get("tube.key");
+        $tube = $tubeApiKey? new TubeScraper($tubeApiKey) : null;
+        $tubeCacheTtl = Config::get("cache.ttl.tube");
+
+        $meta = Cache::get($tubeCkey, []);
+        if (empty($meta) && !empty($tubeIds) && $tube && $fresh) {
+            $meta = $tube->scrapeVideos($tubeIds);
+            Cache::set($tubeCkey, $meta, $tubeCacheTtl);
+        }
+
+        if ($this->getScrapeTimeRemaining() <= 0) {
+            return;
+        }
+
+        foreach ($tubeTodo as $entry) {
+            $tubeId = TubeScraper::getTubeId($entry->href);
+            $vidMeta = $meta[$tubeId] ?? null;
+            $snippet = $vidMeta->snippet ?? null;
+
+            if (!$tubeId || !$vidMeta || !$snippet) {
                 continue;
             }
 
-            if (empty($fileMeta[$n])) {
-                $fileMeta[$n] = ((new MetaScraper($entry))->scrape());
-                $cfresh = $cfresh || !!$fileMeta[$n];
-            }
+            $entry->meta = [
+                "channelId" => $snippet->channelId,
+                "channelName" => $snippet->channelTitle,
+                "tags" => $snippet->tags ?? []
+            ];
 
-            if ($fileMeta[$n]) {
-                $entry->header = $fileMeta[$n]->header;
-                $entry->meta = $fileMeta[$n]->data;
-            }
+            $entry->ctime = strtotime($snippet->publishedAt);
+            $entry->mtime = $entry->ctime;
+            $entry->description = $snippet->description;
+            $entry->name = $snippet->title;
+            $entry->thumb = $snippet->thumbnails->default->url;
+            $entry->size = null;
+
+            $entry->description = self::getSaneDescription($entry);
         }
 
-        if ($cfresh) {
-            Cache::set($metaCkey, $fileMeta, $cacheMetaTtl);
-        }
-
-        if ($tube) {
-            $tubeCkey .= implode(TubeScraper::getTubeIds($this->entries));
-            $tubeMeta = Cache::get($tubeCkey);
-
-            if (is_null($tubeMeta)) {
-                $tubeMeta = $tube->scrapeVideoMeta($this->entries);
-
-                if ($tubeMeta) {
-                    Cache::set($tubeCkey, $tubeMeta, $cacheTubeTtl);
-                }
-            }
-
-            foreach ($this->entries as $entry) {
-                $tubeId = TubeScraper::getTubeId($entry->href ?? null);
-
-                if (!$tubeId) {
-                    continue;
-                }
-
-                $meta = $tubeMeta[$tubeId] ?? null;
-                $snippet = $meta->snippet ?? null;
-
-                if (!$snippet) {
-                    continue;
-                }
-
-                $entry->meta = [
-                    "channelId" => $snippet->channelId,
-                    "channelName" => $snippet->channelTitle,
-                    "tags" => $snippet->tags ?? []
-                ];
-
-                $entry->ctime = strtotime($snippet->publishedAt);
-                $entry->mtime = $entry->ctime;
-                $entry->description = $snippet->description;
-                $entry->name = $snippet->title;
-                $entry->thumb = $snippet->thumbnails->default->url;
-                $entry->size = null;
-
-                $entry->description = self::getSaneDescription($entry);
-            }
-        }
+        return $this->getScrapeTimeRemaining();
     }
 
     public function sort($opts=[]) {
@@ -362,6 +414,21 @@ class Entries {
         }
 
         return $entry;
+    }
+
+    private function getScrapeTimeRemaining() {
+        if ($this->scrapeTimeout && $this->scrapeStartedAt) {
+            return $this->scrapeTimeout - ((microtime(true) - $this->scrapeStartedAt) * 1000);
+        } else {
+            return 1;
+        }
+    }
+
+    private function setScrapeTimer($timeout) {
+        $this->scrapeStartedAt = microtime(true);
+        $this->scrapeTimeout = (int)$timeout;
+
+        return $this->getScrapeTimeRemaining();
     }
 }
 
